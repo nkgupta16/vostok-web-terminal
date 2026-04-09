@@ -98,8 +98,16 @@ html, body, [data-testid="stAppViewContainer"] {
     font-family: 'Inter', sans-serif !important; color: var(--text-primary);
 }
 /* Reduce Streamlit default top padding */
-.stMainBlockContainer { padding-top: 1rem !important; }
-header[data-testid="stHeader"] { display: none !important; }
+.stMainBlockContainer { padding-top: 0.5rem !important; }
+header[data-testid="stHeader"] {
+    background: var(--bg-primary) !important;
+    height: 2.2rem !important; min-height: 2.2rem !important;
+    border-bottom: 1px solid var(--border) !important;
+}
+/* Scanning status bar */
+.scan-status { background: linear-gradient(90deg, rgba(0,229,255,0.08), rgba(0,229,255,0.15), rgba(0,229,255,0.08)); border: 1px solid rgba(0,229,255,0.2); border-radius: 8px; padding: 6px 16px; margin-bottom: 8px; font-size: 0.8rem; color: #00e5ff; display: flex; align-items: center; gap: 8px; }
+@keyframes spin-dot { 0%{opacity:0.3} 50%{opacity:1} 100%{opacity:0.3} }
+.scan-dot { width: 8px; height: 8px; border-radius: 50%; background: #00e5ff; animation: spin-dot 1s infinite; }
 
 /* Metric Cards */
 [data-testid="stMetric"] {
@@ -219,23 +227,45 @@ st.sidebar.caption(f"{len(selected)}/{len(all_tickers)} tickers active")
 # Add / Remove tickers
 with st.sidebar.expander("➕ Add / Remove Tickers"):
     new_ticker = st.text_input("Ticker Symbol", key="new_ticker_input", placeholder="e.g. MGNT")
-    new_uid = st.text_input("Instrument UID", key="new_uid_input", placeholder="UID from T-Bank")
+    st.caption("UID is auto-detected from T-Bank API")
 
     ac1, ac2 = st.columns(2)
     if ac1.button("➕ Add", key="add_ticker", use_container_width=True):
         t = new_ticker.strip().upper()
-        u = new_uid.strip()
-        if t and u:
-            all_tickers[t] = u
-            st.session_state["tickers"] = all_tickers
-            if t not in st.session_state["selected_tickers"]:
-                st.session_state["selected_tickers"].append(t)
-            save_tickers(all_tickers)
-            log(f"Added ticker {t} ({u})")
-            st.success(f"Added {t}")
-            st.rerun()
+        if not t:
+            st.warning("Enter a ticker symbol.")
+        elif t in all_tickers:
+            st.info(f"{t} already exists.")
+        elif not token:
+            st.warning("Connect API token first to auto-find UID.")
         else:
-            st.warning("Enter both ticker and UID.")
+            # Auto-find UID via T-Bank API
+            with st.spinner(f"🔍 Looking up {t}…"):
+                found_uid = None
+                try:
+                    from t_tech.invest import Client, InstrumentStatus
+                    with Client(token) as cl:
+                        resp = cl.instruments.shares(
+                            instrument_status=InstrumentStatus.INSTRUMENT_STATUS_BASE
+                        )
+                        for share in resp.instruments:
+                            if share.ticker == t:
+                                found_uid = share.uid
+                                break
+                except Exception as e:
+                    st.error(f"API error: {e}")
+
+            if found_uid:
+                all_tickers[t] = found_uid
+                st.session_state["tickers"] = all_tickers
+                if t not in st.session_state["selected_tickers"]:
+                    st.session_state["selected_tickers"].append(t)
+                save_tickers(all_tickers)
+                log(f"Added ticker {t} (UID: {found_uid})")
+                st.success(f"✅ Added {t} — UID auto-detected")
+                st.rerun()
+            else:
+                st.error(f"❌ Ticker '{t}' not found on MOEX via T-Bank API.")
 
     remove_ticker = st.selectbox("Remove Ticker", options=[""] + sorted(all_tickers.keys()), key="rm_ticker")
     if ac2.button("🗑️ Remove", key="rm_btn", use_container_width=True):
@@ -278,6 +308,9 @@ with hcol2:
         unsafe_allow_html=True,
     )
 
+# ── Scanning status bar ──
+_status_placeholder = st.empty()
+
 # ═════════════════════════════════════════════════════════════════════
 # TABS
 # ═════════════════════════════════════════════════════════════════════
@@ -306,9 +339,19 @@ with tab_dash:
         st.warning("⚠️ Select at least one ticker in the sidebar.")
         st.stop()
 
+    _status_placeholder.markdown(
+        '<div class="scan-status"><span class="scan-dot"></span>'
+        f'Scanning {len(selected_tickers)} tickers… Dashboard</div>',
+        unsafe_allow_html=True,
+    )
     with st.spinner(f"🔍 Scanning {len(selected_tickers)} tickers…"):
         data = scan_market(token, tickers_tuple)
         st.session_state["market_data"] = data
+    _status_placeholder.markdown(
+        '<div class="scan-status" style="border-color:rgba(0,230,118,0.3); color:#00e676;">'
+        f'✅ Dashboard scan complete — {len(data)} tickers at {datetime.now().strftime("%H:%M:%S")}</div>',
+        unsafe_allow_html=True,
+    )
 
     if not data:
         st.error("No data returned. Check your token or network connection.")
@@ -412,9 +455,19 @@ with tab_squeeze:
     elif not selected_tickers:
         st.warning("⚠️ Select at least one ticker.")
     else:
+        _status_placeholder.markdown(
+            '<div class="scan-status"><span class="scan-dot"></span>'
+            f'Scanning {len(selected_tickers)} tickers… Squeeze Detection</div>',
+            unsafe_allow_html=True,
+        )
         with st.spinner(f"🔍 Scanning {len(selected_tickers)} tickers for squeezes…"):
             sq_data = scan_squeeze(token, tickers_tuple)
             log(f"Squeeze scan complete — {len(sq_data)} tickers")
+        _status_placeholder.markdown(
+            '<div class="scan-status" style="border-color:rgba(0,230,118,0.3); color:#00e676;">'
+            f'✅ Squeeze scan complete — {len(sq_data)} tickers at {datetime.now().strftime("%H:%M:%S")}</div>',
+            unsafe_allow_html=True,
+        )
 
         if not sq_data:
             st.info("No squeeze data returned.")
