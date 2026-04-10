@@ -7,13 +7,16 @@ share instrument lists, and computing per-ticker analytics.
 
 import json
 import os
+import asyncio
+import concurrent.futures
 from datetime import timedelta
 from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
+from loguru import logger
 
-from t_tech.invest import Client, CandleInterval, InstrumentStatus
+from t_tech.invest import Client, AsyncClient, CandleInterval, InstrumentStatus
 from t_tech.invest.utils import now
 
 from services.indicators import (
@@ -193,151 +196,167 @@ def fetch_lot_sizes(client: Client, tickers: Dict[str, str]) -> Dict[str, int]:
     return lot_sizes
 
 
-def fetch_candles(
-    client: Client, uid: str, days: int = CANDLES_COUNT
-) -> Optional[list]:
-    """Fetch last *days* daily candles for an instrument UID."""
+def run_coro_sync(coro_func, *args):
+    """Run an async coroutine synchronously in a dedicated thread to avoid Streamlit event-loop clashes."""
+    def _run():
+        return asyncio.run(coro_func(*args))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_run)
+        return future.result()
+
+async def fetch_candles_async(client: AsyncClient, uid: str, days: int = CANDLES_COUNT) -> list:
+    """Fetch last *days* daily candles for an instrument UID asynchronously."""
     try:
-        candles = list(
-            client.get_all_candles(
-                instrument_id=uid,
-                from_=now() - timedelta(days=days + 10),
-                to=now(),
-                interval=CandleInterval.CANDLE_INTERVAL_DAY,
-            )
-        )
+        from_time = now() - timedelta(days=days + 10)
+        to_time = now()
+        candles = []
+        async for c in client.get_all_candles(
+            instrument_id=uid,
+            from_=from_time,
+            to=to_time,
+            interval=CandleInterval.CANDLE_INTERVAL_DAY,
+        ):
+            candles.append(c)
+            
         if len(candles) > days:
             candles = candles[-days:]
         return candles
-    except Exception:
-        return None
-
+    except Exception as e:
+        logger.error(f"Failed to fetch candles for UID {uid}: {e}")
+        return []
 
 # ---------------------------------------------------------------------------
 # Full Market Scan
 # ---------------------------------------------------------------------------
 
+async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict:
+    results = {}
+    async def process_ticker(client: AsyncClient, ticker: str, uid: str):
+        try:
+            candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
+            if not candles or len(candles) < 2:
+                return
+
+            df = prepare_candle_data(candles)
+            df = calculate_indicators(df)
+
+            latest = df.iloc[-1]
+            previous = df.iloc[-2]
+
+            price = float(latest["close"])
+            rsi = float(latest["RSI"])
+            bb_lower = float(latest["BB_LOWER"])
+            bb_upper = float(latest["BB_UPPER"])
+            macd_hist = float(latest["MACD_HISTOGRAM"])
+            prev_hist = float(previous["MACD_HISTOGRAM"])
+            vol = float(latest["volume"])
+
+            # Volume ratio vs 10d average
+            if len(df) >= 10:
+                avg_vol = float(df["volume"].iloc[-11:-1].mean())
+                vol_ratio = (vol / avg_vol) * 100 if avg_vol > 0 else 100.0
+            else:
+                vol_ratio = 100.0
+
+            # Derived metrics
+            price_to_bb = ((price - bb_lower) / bb_lower) * 100 if bb_lower else 0
+            macd_change = (
+                ((macd_hist - prev_hist) / abs(prev_hist)) * 100
+                if prev_hist != 0
+                else 0.0
+            )
+
+            signal, _ = check_buy_signal(df, bb_buffer=BB_BUFFER)
+
+            confidence = calculate_confidence_score(
+                rsi=rsi,
+                price=price,
+                bb_lower=bb_lower,
+                bb_upper=bb_upper,
+                volume_ratio=vol_ratio,
+                macd_hist=macd_hist,
+                macd_change=macd_change,
+            )
+
+            label = get_signal_label(confidence, signal)
+
+            results[ticker] = {
+                "price": price,
+                "rsi": rsi,
+                "bb_lower": bb_lower,
+                "bb_upper": bb_upper,
+                "bb_middle": float(latest["BB_MIDDLE"]),
+                "macd_hist": macd_hist,
+                "macd_change": macd_change,
+                "volume_ratio": vol_ratio,
+                "price_to_bb": price_to_bb,
+                "signal": signal,
+                "confidence": confidence,
+                "label": label,
+                "lot_size": lot_sizes.get(ticker, 1),
+                "df": df,
+            }
+        except Exception as e:
+            logger.error(f"Market scan error for {ticker}: {e}")
+
+    async with AsyncClient(token) as client:
+        tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
+        await asyncio.gather(*tasks)
+    return results
+
 @st.cache_data(ttl=55, show_spinner=False)
 def scan_market(_token: str, _tickers_tuple: tuple) -> Dict[str, dict]:
     """
     Full market scan: fetch candles, compute indicators, and score each ticker.
-
-    Returns a dict keyed by ticker with analytics payload.
+    Uses async API to fetch all selected tickers concurrently.
     """
     tickers = dict(_tickers_tuple)
-    results: Dict[str, dict] = {}
+    with Client(_token) as sync_client:
+        lot_sizes = fetch_lot_sizes(sync_client, tickers)
+        
+    return run_coro_sync(_scan_market_batch, _token, tickers, lot_sizes)
 
-    with Client(_token) as client:
-        lot_sizes = fetch_lot_sizes(client, tickers)
 
-        for ticker, uid in tickers.items():
-            try:
-                candles = fetch_candles(client, uid, CANDLES_COUNT)
-                if not candles or len(candles) < 2:
-                    continue
+# ---------------------------------------------------------------------------
+# Squeeze Scan 
+# ---------------------------------------------------------------------------
 
-                df = prepare_candle_data(candles)
-                df = calculate_indicators(df)
+async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
+    results = {}
+    async def process_ticker(client: AsyncClient, ticker: str, uid: str):
+        try:
+            to_time = now()
+            from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
+            candles = []
+            async for c in client.get_all_candles(
+                instrument_id=uid,
+                from_=from_time,
+                to=to_time,
+                interval=CandleInterval.CANDLE_INTERVAL_DAY,
+            ):
+                candles.append(c)
+                
+            if len(candles) < 30:
+                return
 
-                latest = df.iloc[-1]
-                previous = df.iloc[-2]
+            df = prepare_candle_data(candles)
+            df = calculate_indicators(df)
+            metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
 
-                price = float(latest["close"])
-                rsi = float(latest["RSI"])
-                bb_lower = float(latest["BB_LOWER"])
-                bb_upper = float(latest["BB_UPPER"])
-                macd_hist = float(latest["MACD_HISTOGRAM"])
-                prev_hist = float(previous["MACD_HISTOGRAM"])
-                vol = float(latest["volume"])
+            results[ticker] = {
+                "price": float(df.iloc[-1]["close"]),
+                "metrics": metrics,
+            }
+        except Exception as e:
+            logger.error(f"Squeeze scan error for {ticker}: {e}")
 
-                # Volume ratio vs 10d average
-                if len(df) >= 10:
-                    avg_vol = float(df["volume"].iloc[-11:-1].mean())
-                    vol_ratio = (vol / avg_vol) * 100 if avg_vol > 0 else 100.0
-                else:
-                    vol_ratio = 100.0
-
-                # Derived metrics
-                price_to_bb = ((price - bb_lower) / bb_lower) * 100 if bb_lower else 0
-                macd_change = (
-                    ((macd_hist - prev_hist) / abs(prev_hist)) * 100
-                    if prev_hist != 0
-                    else 0.0
-                )
-
-                signal, _ = check_buy_signal(df, bb_buffer=BB_BUFFER)
-
-                confidence = calculate_confidence_score(
-                    rsi=rsi,
-                    price=price,
-                    bb_lower=bb_lower,
-                    bb_upper=bb_upper,
-                    volume_ratio=vol_ratio,
-                    macd_hist=macd_hist,
-                    macd_change=macd_change,
-                )
-
-                label = get_signal_label(confidence, signal)
-
-                results[ticker] = {
-                    "price": price,
-                    "rsi": rsi,
-                    "bb_lower": bb_lower,
-                    "bb_upper": bb_upper,
-                    "bb_middle": float(latest["BB_MIDDLE"]),
-                    "macd_hist": macd_hist,
-                    "macd_change": macd_change,
-                    "volume_ratio": vol_ratio,
-                    "price_to_bb": price_to_bb,
-                    "signal": signal,
-                    "confidence": confidence,
-                    "label": label,
-                    "lot_size": lot_sizes.get(ticker, 1),
-                    "df": df,  # full DataFrame for charting
-                }
-            except Exception:
-                continue
-
+    async with AsyncClient(token) as client:
+        tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
+        await asyncio.gather(*tasks)
     return results
-
-
-# ---------------------------------------------------------------------------
-# Squeeze Scan — uses more history for accurate percentiles
-# ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=55, show_spinner=False)
 def scan_squeeze(_token: str, _tickers_tuple: tuple) -> Dict[str, dict]:
-    """Scan all tickers for volatility squeeze metrics."""
+    """Scan all tickers for volatility squeeze metrics asynchronously."""
     tickers = dict(_tickers_tuple)
-    results: Dict[str, dict] = {}
-
-    with Client(_token) as client:
-        to_time = now()
-        from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
-
-        for ticker, uid in tickers.items():
-            try:
-                # Use get_all_candles for reliable pagination
-                candles = list(
-                    client.get_all_candles(
-                        instrument_id=uid,
-                        from_=from_time,
-                        to=to_time,
-                        interval=CandleInterval.CANDLE_INTERVAL_DAY,
-                    )
-                )
-                if len(candles) < 30:
-                    continue
-
-                df = prepare_candle_data(candles)
-                df = calculate_indicators(df)
-                metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
-
-                results[ticker] = {
-                    "price": float(df.iloc[-1]["close"]),
-                    "metrics": metrics,
-                }
-            except Exception:
-                continue
-
-    return results
+    return run_coro_sync(_scan_squeeze_batch, _token, tickers)

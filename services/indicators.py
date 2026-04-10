@@ -10,6 +10,7 @@ Quantitative Confidence Scoring, and Signal Classification.
 from typing import Dict, Tuple
 import pandas as pd
 import numpy as np
+import pandas_ta as ta
 
 # ---------------------------------------------------------------------------
 # Default Parameters
@@ -51,14 +52,7 @@ def prepare_candle_data(candles: list) -> pd.DataFrame:
 
 def calculate_rsi(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     """Relative Strength Index (Wilder smoothing via EMA)."""
-    delta = close.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
+    return close.ta.rsi(length=period)
 
 def calculate_bollinger_bands(
     close: pd.Series,
@@ -66,12 +60,10 @@ def calculate_bollinger_bands(
     std_dev: float = BB_STD_DEV,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """Return (upper, middle, lower) Bollinger Bands."""
-    middle = close.rolling(window=period).mean()
-    std = close.rolling(window=period).std()
-    upper = middle + std_dev * std
-    lower = middle - std_dev * std
-    return upper, middle, lower
-
+    bb = close.ta.bbands(length=period, std=std_dev)
+    if bb is None or bb.empty:
+        return pd.Series(index=close.index), pd.Series(index=close.index), pd.Series(index=close.index)
+    return bb.iloc[:, 2], bb.iloc[:, 1], bb.iloc[:, 0]  # Upper, Middle, Lower
 
 def calculate_macd(
     close: pd.Series,
@@ -80,31 +72,18 @@ def calculate_macd(
     signal: int = MACD_SIGNAL,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """Return (macd_line, signal_line, histogram)."""
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
-
+    macd = close.ta.macd(fast=fast, slow=slow, signal=signal)
+    if macd is None or macd.empty:
+         return pd.Series(index=close.index), pd.Series(index=close.index), pd.Series(index=close.index)
+    return macd.iloc[:, 0], macd.iloc[:, 2], macd.iloc[:, 1]  # Line, Signal, Histogram
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """Average True Range."""
-    high_low = df["high"] - df["low"]
-    high_close = np.abs(df["high"] - df["close"].shift())
-    low_close = np.abs(df["low"] - df["close"].shift())
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return true_range.rolling(period).mean()
-
+    return df.ta.atr(length=period)
 
 def calculate_obv(df: pd.DataFrame) -> pd.Series:
     """On-Balance Volume."""
-    direction = np.where(
-        df["close"] > df["close"].shift(1),
-        df["volume"],
-        np.where(df["close"] < df["close"].shift(1), -df["volume"], 0),
-    )
-    return pd.Series(direction, index=df.index).cumsum()
+    return df.ta.obv()
 
 # ---------------------------------------------------------------------------
 # Composite Indicator Calculation

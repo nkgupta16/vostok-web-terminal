@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from loguru import logger
+from st_copy_to_clipboard import st_copy_to_clipboard
 
 # ── Page Config ──────────────────────────────────────────────────────
 st.set_page_config(
@@ -57,19 +59,33 @@ os.makedirs(_LOGS_DIR, exist_ok=True)
 if "app_logs" not in st.session_state:
     st.session_state["app_logs"] = []
 
+# Clear existing handlers
+logger.remove()
+
+# Add console handler
+logger.add(os.sys.stderr, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>")
+
+# Add UI sink handler
+logger.add(
+    lambda msg: st.session_state["app_logs"].append(msg),
+    format="{time:HH:mm:ss} | {level} | {message}",
+    level="INFO"
+)
 
 def log(msg: str, level: str = "INFO"):
-    """Append a timestamped log entry."""
-    ts = datetime.now().strftime("%H:%M:%S")
-    entry = f"[{ts}] [{level}] {msg}"
-    st.session_state["app_logs"].append(entry)
-    # Keep last 500 lines
+    """Shim to route existing log() calls into loguru."""
+    if level.upper() == "ERROR":
+        logger.error(msg)
+    elif level.upper() == "WARNING":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    
     if len(st.session_state["app_logs"]) > 500:
         st.session_state["app_logs"] = st.session_state["app_logs"][-500:]
 
-
 def get_log_text() -> str:
-    return "\n".join(st.session_state["app_logs"])
+    return "".join(st.session_state["app_logs"])
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -402,10 +418,10 @@ with tab_dash:
         )
 
         # Copy button
-        st.download_button(
-            "📋 Copy Dashboard Data (TSV)", df_to_tsv(df_display),
-            file_name=f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.tsv",
-            mime="text/tab-separated-values", key="copy_dash",
+        st_copy_to_clipboard(
+            text=df_to_tsv(df_display),
+            before_copy_label="📋 Copy Dashboard Data",
+            after_copy_label="✅ Copied!",
         )
 
         # Chart for selected ticker
@@ -502,10 +518,10 @@ with tab_squeeze:
             df_sq = pd.DataFrame(rows_sq)
             st.dataframe(df_sq, use_container_width=True, hide_index=True, height=min(600, 40 + 35 * len(df_sq)))
 
-            st.download_button(
-                "📋 Copy Squeeze Data (TSV)", df_to_tsv(df_sq),
-                file_name=f"squeeze_{datetime.now().strftime('%Y%m%d_%H%M')}.tsv",
-                mime="text/tab-separated-values", key="copy_squeeze",
+            st_copy_to_clipboard(
+                text=df_to_tsv(df_sq),
+                before_copy_label="📋 Copy Squeeze Data",
+                after_copy_label="✅ Copied!",
             )
 
 # ═════════════════════════════════════════════════════════════════════
@@ -552,7 +568,35 @@ with tab_port:
                     }),
                     use_container_width=True, hide_index=True,
                 )
-                st.download_button("📋 Copy Positions (TSV)", df_to_tsv(df_pos), file_name="positions.tsv", mime="text/tab-separated-values", key="copy_pos")
+                st_copy_to_clipboard(text=df_to_tsv(df_pos), before_copy_label="📋 Copy Positions", after_copy_label="✅ Copied!")
+
+                st.markdown("#### 🩺 Portfolio Health Evaluation")
+                mkt = st.session_state.get("market_data", {})
+                if not mkt:
+                    st.info("Run Dashboard scan first to evaluate portfolio health.")
+                else:
+                    health_rows = []
+                    for pos_data in pf["positions"]:
+                        t = pos_data["ticker"]
+                        if t in mkt:
+                            md = mkt[t]
+                            status = "🟢 STRONG"
+                            action = "Hold"
+                            if md["confidence"] < 45 or md["macd_hist"] < 0:
+                                status = "🔴 WEAK"
+                                action = "Trim/Sell (MACD < 0 or Low Confidence)"
+                            elif md["rsi"] > 70:
+                                status = "🟠 OVERBOUGHT"
+                                action = "Take Profit (RSI > 70)"
+                                
+                            health_rows.append({
+                                "Ticker": t, "Health": status, "Conf %": md["confidence"],
+                                "MACD": md["macd_hist"], "RSI": md["rsi"], "Action": action
+                            })
+                    if health_rows:
+                        st.dataframe(pd.DataFrame(health_rows).style.format({"Conf %": "{:.0f}%", "MACD": "{:.2f}", "RSI": "{:.1f}"}), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Scan missing these tickers.")
             else:
                 st.info("No open positions.")
 
@@ -564,7 +608,7 @@ with tab_port:
                     df_ops.style.format({"Price": "₽ {:.2f}", "Amount": "₽ {:+,.0f}", "Qty": "{:.0f}"}),
                     use_container_width=True, hide_index=True,
                 )
-                st.download_button("📋 Copy Operations (TSV)", df_to_tsv(df_ops), file_name="operations.tsv", mime="text/tab-separated-values", key="copy_ops")
+                st_copy_to_clipboard(text=df_to_tsv(df_ops), before_copy_label="📋 Copy Operations", after_copy_label="✅ Copied!")
             else:
                 st.info("No recent operations.")
 
@@ -627,7 +671,7 @@ with tab_divs:
                 }),
                 use_container_width=True, hide_index=True,
             )
-            st.download_button("📋 Copy Dividends (TSV)", df_to_tsv(df_div), file_name="dividends.tsv", mime="text/tab-separated-values", key="copy_divs")
+            st_copy_to_clipboard(text=df_to_tsv(df_div), before_copy_label="📋 Copy Dividends", after_copy_label="✅ Copied!")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -694,16 +738,27 @@ with tab_sandbox:
                     with st.expander(f"🟢 {ticker} — ₽{d['price']:.2f}  (Confidence: {d['confidence']:.0f}%)"):
                         pos = calculate_position_size(50_000, 0.01, 0.02, d["price"], d["lot_size"])
                         st.markdown(f"**Lots:** {pos['lots']} · **Shares:** {pos['shares']} · **Value:** ₽{pos['position_value']:,.0f}")
-                        if st.button(f"🚀 Paper BUY {ticker}", key=f"sb_buy_{ticker}", disabled=not sandbox_status):
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            ord_type = st.selectbox("Order Type", ["MARKET", "LIMIT"], key=f"sb_type_{ticker}")
+                        with col2:
+                            lim_price = st.number_input("Limit Price", value=float(d["price"]), format="%.2f", disabled=(ord_type=="MARKET"), key=f"sb_price_{ticker}")
+                        
+                        if st.button(f"🚀 Paper Execute {ticker}", key=f"sb_buy_{ticker}", disabled=not sandbox_status):
                             try:
                                 uid = selected_tickers.get(ticker)
-                                order_id = sandbox_buy(token, sandbox_status, uid, pos["lots"])
-                                st.success(f"Order placed! ID: `{order_id}`")
-                                log(f"Sandbox BUY: {ticker} × {pos['lots']} lots — order {order_id}")
+                                # Note: sandbox_buy was renamed to sandbox_order
+                                from services.portfolio import sandbox_order
+                                order_id = sandbox_order(token, sandbox_status, uid, pos["lots"], ord_type, lim_price)
+                                
+                                st.success(f"{ord_type} Order placed! ID: `{order_id}`")
+                                log(f"Sandbox {ord_type} BUY: {ticker} × {pos['lots']} lots @ {lim_price if ord_type == 'LIMIT' else 'MARKET'} — order {order_id}")
+                                
                                 if "sandbox_orders" not in st.session_state:
                                     st.session_state["sandbox_orders"] = []
                                 st.session_state["sandbox_orders"].append({
-                                    "ticker": ticker, "lots": pos["lots"], "price": d["price"],
+                                    "ticker": ticker, "type": ord_type, "lots": pos["lots"], "price": lim_price if ord_type == 'LIMIT' else d["price"],
                                     "order_id": order_id, "time": datetime.now().strftime("%H:%M:%S"),
                                 })
                             except Exception as e:
@@ -714,7 +769,7 @@ with tab_sandbox:
             st.markdown("#### 📜 Order History")
             df_sb = pd.DataFrame(st.session_state["sandbox_orders"])
             st.dataframe(df_sb, use_container_width=True, hide_index=True)
-            st.download_button("📋 Copy Orders (TSV)", df_to_tsv(df_sb), file_name="sandbox_orders.tsv", mime="text/tab-separated-values", key="copy_sb")
+            st_copy_to_clipboard(text=df_to_tsv(df_sb), before_copy_label="📋 Copy Orders", after_copy_label="✅ Copied!")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -732,45 +787,99 @@ with tab_strat:
 
     s1, s2 = st.columns([2, 1])
     with s1:
-        strategy = st.selectbox("Select Strategy", ["Buy The Dip", "Volatility Squeeze"], key="strat_sel")
+        st.markdown("##### Parameters")
+        c1, c2 = st.columns(2)
+        strategy = c1.selectbox("Select Strategy", ["Buy The Dip", "Volatility Squeeze"], key="strat_sel")
+        bt_ticker = c2.selectbox("Target Asset", list(selected_tickers.keys()) if selected_tickers else ["SBER"], key="bt_ticker")
     with s2:
-        run_bt = st.button("▶ Run Backtest", type="primary", key="run_bt")
+        st.markdown("<br>", unsafe_allow_html=True)
+        run_bt = st.button("▶ Run Backtest", type="primary", key="run_bt", use_container_width=True)
 
-    if run_bt or st.session_state.get("backtest_ran"):
+    if run_bt and token:
         st.session_state["backtest_ran"] = True
-        np.random.seed(42 if strategy == "Buy The Dip" else 7)
-        days = 252
-        if strategy == "Buy The Dip":
-            returns = np.random.normal(0.001, 0.015, days)
-        else:
-            returns = np.random.normal(-0.0005, 0.005, days)
-            for _ in range(5):
-                returns[np.random.randint(0, days)] += 0.05
+        
+        with st.spinner(f"⏳ Fetching 1.5-year history for {bt_ticker} & crunching stats..."):
+            uid = selected_tickers.get(bt_ticker, "e6123145-9665-43e0-8413-cd61b8aa9b13") # fallback to SBER
+            from services.market import run_coro_sync, fetch_candles_async
+            from t_tech.invest import AsyncClient
 
-        equity = 100_000 * np.cumprod(1 + returns)
-        peak = np.maximum.accumulate(equity)
-        drawdown = ((equity - peak) / peak) * 100
+            async def _fetch_hist():
+                async with AsyncClient(token) as client:
+                    return await fetch_candles_async(client, uid, 380) # ~1.5 years trading days
 
-        fig_eq = go.Figure()
-        fig_eq.add_trace(go.Scatter(y=equity, name="Equity", line=dict(color="#00e5ff", width=2.5), fill="tozeroy", fillcolor="rgba(0,229,255,0.06)"))
-        fig_eq.update_layout(title=f"{strategy} — Equity Curve", template="plotly_dark", paper_bgcolor="#0a0e12", plot_bgcolor="#0d1520", height=320, margin=dict(l=40, r=20, t=50, b=30), font=dict(family="Inter", size=12, color="#e0e4ea"), yaxis_title="₽")
-        st.plotly_chart(fig_eq, use_container_width=True)
+            candles = run_coro_sync(_fetch_hist)
 
-        fig_dd = go.Figure()
-        fig_dd.add_trace(go.Scatter(y=drawdown, name="Drawdown", line=dict(color="#ff5252", width=2), fill="tozeroy", fillcolor="rgba(255,82,82,0.12)"))
-        fig_dd.update_layout(title="Drawdown (%)", template="plotly_dark", paper_bgcolor="#0a0e12", plot_bgcolor="#0d1520", height=200, margin=dict(l=40, r=20, t=40, b=30), font=dict(family="Inter", size=12, color="#e0e4ea"), yaxis_title="%")
-        st.plotly_chart(fig_dd, use_container_width=True)
+            if not candles or len(candles) < 60:
+                st.error("Not enough historical data to generate a valid backtest.")
+            else:
+                from services.indicators import prepare_candle_data, calculate_indicators
+                df = prepare_candle_data(candles)
+                df = calculate_indicators(df)
+                
+                # Vectorize signaling logic
+                df["Btw_Dip_Signal"] = (df["RSI"] < 35) & (df["MACD_HISTOGRAM"] > df["MACD_HISTOGRAM"].shift(1)) & (df["close"] <= df["BB_LOWER"] * 1.01)
+                
+                df["BB_WIDTH"] = (df["BB_UPPER"] - df["BB_LOWER"]) / df["BB_MIDDLE"]
+                # 120-day rolling rank for percentiles
+                df["BB_WIDTH_RANK"] = df["BB_WIDTH"].rolling(window=120, min_periods=30).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1])
+                df["Squeeze_Signal"] = (df["BB_WIDTH_RANK"] < 0.20) & (df["MACD_HISTOGRAM"] > df["MACD_HISTOGRAM"].shift(1)) & (df["MACD_HISTOGRAM"].shift(1) < 0)
+                
+                signals = df["Btw_Dip_Signal"] if strategy == "Buy The Dip" else df["Squeeze_Signal"]
+                
+                # Forward 5-day return (Enter next open, exit 5 closes later)
+                df["Fwd_5d_Ret"] = (df["close"].shift(-5) - df["open"].shift(-1)) / df["open"].shift(-1)
+                
+                equity_curve = [100_000.0] * len(df)
+                eq = 100_000.0
+                win_count = 0
+                trade_count = 0
+                
+                i = 50 # Start after enough warmup
+                while i < len(df) - 5:
+                    if signals.iloc[i]:
+                        ret = df["Fwd_5d_Ret"].iloc[i]
+                        eq = eq * (1 + ret)
+                        if ret > 0: win_count += 1
+                        trade_count += 1
+                        for j in range(5):
+                            if i + j + 1 < len(df):
+                                equity_curve[i + j + 1] = eq
+                        i += 5 # Skip holdings period
+                    else:
+                        if i + 1 < len(df):
+                            equity_curve[i + 1] = eq
+                        i += 1
+                        
+                # Fill remaining tail
+                for j in range(i, len(df)):
+                    equity_curve[j] = eq
+                
+                equity = np.array(equity_curve)
+                peak = np.maximum.accumulate(equity)
+                drawdown = ((equity - peak) / peak) * 100
+                
+                total_ret = ((equity[-1] / 100_000) - 1) * 100
+                max_dd = np.min(drawdown)
+                win_rate = (win_count / trade_count * 100) if trade_count > 0 else 0.0
 
-        total_ret = ((equity[-1] / 100_000) - 1) * 100
-        max_dd = np.min(drawdown)
-        sharpe = (np.mean(returns) / np.std(returns)) * np.sqrt(252) if np.std(returns) > 0 else 0
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(y=equity, x=df.index, name="Equity", line=dict(color="#00e5ff", width=2.5), fill="tozeroy", fillcolor="rgba(0,229,255,0.06)"))
+                fig_eq.update_layout(title=f"{bt_ticker} — {strategy} Equity Curve", template="plotly_dark", paper_bgcolor="#0a0e12", plot_bgcolor="#0d1520", height=320, margin=dict(l=40, r=20, t=50, b=30), font=dict(family="Inter", size=12, color="#e0e4ea"), yaxis_title="₽")
+                st.plotly_chart(fig_eq, use_container_width=True)
 
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Total Return", f"{total_ret:+.2f}%")
-        s2.metric("Max Drawdown", f"{max_dd:.2f}%")
-        s3.metric("Sharpe Ratio", f"{sharpe:.2f}")
-        s4.metric("Final Value", f"₽ {equity[-1]:,.0f}")
-        log(f"Backtest: {strategy} — Ret={total_ret:.2f}% DD={max_dd:.2f}%")
+                fig_dd = go.Figure()
+                fig_dd.add_trace(go.Scatter(y=drawdown, x=df.index, name="Drawdown", line=dict(color="#ff5252", width=2), fill="tozeroy", fillcolor="rgba(255,82,82,0.12)"))
+                fig_dd.update_layout(title="Drawdown (%)", template="plotly_dark", paper_bgcolor="#0a0e12", plot_bgcolor="#0d1520", height=200, margin=dict(l=40, r=20, t=40, b=30), font=dict(family="Inter", size=12, color="#e0e4ea"), yaxis_title="%")
+                st.plotly_chart(fig_dd, use_container_width=True)
+
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Total Return", f"{total_ret:+.2f}%")
+                s2.metric("Max Drawdown", f"{max_dd:.2f}%")
+                s3.metric("Win Rate", f"{win_rate:.1f}% ({win_count}/{trade_count})")
+                s4.metric("Final Value", f"₽ {equity[-1]:,.0f}")
+                log(f"Backtest {bt_ticker}: {strategy} — Ret={total_ret:.2f}% Win={win_rate:.1f}%")
+    elif run_bt and not token:
+        st.warning("⚠️ Connect API Token to run backtests.")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -790,10 +899,10 @@ with tab_logs:
 
     lc1, lc2, lc3 = st.columns(3)
     with lc1:
-        st.download_button(
-            "📋 Copy Logs", log_text,
-            file_name=f"vostok_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
-            mime="text/plain", key="copy_logs",
+        st_copy_to_clipboard(
+            text=log_text,
+            before_copy_label="📋 Copy Logs",
+            after_copy_label="✅ Copied!",
         )
     with lc2:
         if st.button("💾 Save to Logs Folder", key="save_logs"):

@@ -79,7 +79,7 @@ def fetch_portfolio(_token: str) -> dict:
                     cdls = list(
                         client.get_all_candles(
                             instrument_id=figi,
-                            from_=datetime.now(timezone.utc) - timedelta(days=3),
+                            from_=datetime.now(timezone.utc) - timedelta(days=7),
                             to=datetime.now(timezone.utc),
                             interval=CandleInterval.CANDLE_INTERVAL_DAY,
                         )
@@ -257,19 +257,28 @@ def sandbox_deposit(_token: str, account_id: str, amount: int = 100_000):
         )
 
 
-def sandbox_buy(
-    _token: str, account_id: str, uid: str, lots: int
+def sandbox_order(
+    _token: str, account_id: str, uid: str, lots: int, order_type_str: str = "MARKET", limit_price: float = 0.0
 ) -> str:
-    """Place a sandbox market BUY order, return order ID."""
-    from t_tech.invest import OrderDirection, OrderType
+    """Place a sandbox BUY order (MARKET or LIMIT)."""
+    from t_tech.invest import OrderDirection, OrderType, Quotation
+    import math
 
     with Client(_token) as client:
+        # Convert float to Quotation
+        units = math.floor(limit_price)
+        nano = int((limit_price - units) * 1e9)
+        price_quotation = Quotation(units=units, nano=nano)
+
+        otype = OrderType.ORDER_TYPE_LIMIT if order_type_str == "LIMIT" else OrderType.ORDER_TYPE_MARKET
+
         resp = client.sandbox.post_sandbox_order(
             account_id=account_id,
             instrument_id=uid,
             quantity=lots,
             direction=OrderDirection.ORDER_DIRECTION_BUY,
-            order_type=OrderType.ORDER_TYPE_MARKET,
+            order_type=otype,
+            price=price_quotation if otype == OrderType.ORDER_TYPE_LIMIT else None,
         )
         return resp.order_id
 
