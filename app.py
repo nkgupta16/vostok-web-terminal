@@ -42,7 +42,6 @@ from services.portfolio import (
     fetch_dividends,
     sandbox_init,
     sandbox_deposit,
-    sandbox_buy,
 )
 from services.indicators import (
     get_signal_label,
