@@ -52,7 +52,7 @@ def prepare_candle_data(candles: list) -> pd.DataFrame:
 
 def calculate_rsi(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     """Relative Strength Index (Wilder smoothing via EMA)."""
-    return close.ta.rsi(length=period)
+    return ta.rsi(close, length=period)
 
 def calculate_bollinger_bands(
     close: pd.Series,
@@ -60,7 +60,7 @@ def calculate_bollinger_bands(
     std_dev: float = BB_STD_DEV,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """Return (upper, middle, lower) Bollinger Bands."""
-    bb = close.ta.bbands(length=period, std=std_dev)
+    bb = ta.bbands(close, length=period, std=std_dev)
     if bb is None or bb.empty:
         return pd.Series(index=close.index), pd.Series(index=close.index), pd.Series(index=close.index)
     return bb.iloc[:, 2], bb.iloc[:, 1], bb.iloc[:, 0]  # Upper, Middle, Lower
@@ -72,18 +72,18 @@ def calculate_macd(
     signal: int = MACD_SIGNAL,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """Return (macd_line, signal_line, histogram)."""
-    macd = close.ta.macd(fast=fast, slow=slow, signal=signal)
+    macd = ta.macd(close, fast=fast, slow=slow, signal=signal)
     if macd is None or macd.empty:
          return pd.Series(index=close.index), pd.Series(index=close.index), pd.Series(index=close.index)
     return macd.iloc[:, 0], macd.iloc[:, 2], macd.iloc[:, 1]  # Line, Signal, Histogram
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """Average True Range."""
-    return df.ta.atr(length=period)
+    return ta.atr(df["high"], df["low"], df["close"], length=period)
 
 def calculate_obv(df: pd.DataFrame) -> pd.Series:
     """On-Balance Volume."""
-    return df.ta.obv()
+    return ta.obv(df["close"], df["volume"])
 
 # ---------------------------------------------------------------------------
 # Composite Indicator Calculation

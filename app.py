@@ -58,6 +58,9 @@ os.makedirs(_LOGS_DIR, exist_ok=True)
 if "app_logs" not in st.session_state:
     st.session_state["app_logs"] = []
 
+import collections
+GLOBAL_LOG_QUEUE = collections.deque(maxlen=1000)
+
 # Clear existing handlers
 logger.remove()
 
@@ -66,7 +69,7 @@ logger.add(os.sys.stderr, format="<green>{time:HH:mm:ss}</green> | <level>{level
 
 # Add UI sink handler
 logger.add(
-    lambda msg: st.session_state["app_logs"].append(msg),
+    lambda msg: GLOBAL_LOG_QUEUE.append(msg),
     format="{time:HH:mm:ss} | {level} | {message}",
     level="INFO"
 )
@@ -79,12 +82,9 @@ def log(msg: str, level: str = "INFO"):
         logger.warning(msg)
     else:
         logger.info(msg)
-    
-    if len(st.session_state["app_logs"]) > 500:
-        st.session_state["app_logs"] = st.session_state["app_logs"][-500:]
 
 def get_log_text() -> str:
-    return "".join(st.session_state["app_logs"])
+    return "".join(GLOBAL_LOG_QUEUE)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -665,9 +665,14 @@ with tab_divs:
                 return styles
 
             st.dataframe(
-                df_div.style.apply(_style_divs, axis=None).format({
-                    "Div/Share (₽)": "₽ {:.2f}", "Expected Payout (₽)": "₽ {:,.2f}", "Yield est. %": "{:.2f}%",
-                }),
+                df_div.style.apply(_style_divs, axis=None).format(
+                    {
+                        "Div/Share (₽)": "₽ {:.2f}", 
+                        "Expected Payout (₽)": "₽ {:,.2f}", 
+                        "Yield est. %": "{:.2f}%",
+                    },
+                    na_rep="-",
+                ),
                 use_container_width=True, hide_index=True,
             )
             st_copy_to_clipboard(text=df_to_tsv(df_div), before_copy_label="📋 Copy Dividends", after_copy_label="✅ Copied!")
