@@ -9,5 +9,5 @@ python-dotenv>=1.0.0
 pytz>=2024.1
 t-tech-investments>=0.3.0
 loguru>=0.7.0
-pandas-ta==0.3.14b0
+pandas-ta>=0.4.0b0
 st-copy-to-clipboard>=0.1.3
