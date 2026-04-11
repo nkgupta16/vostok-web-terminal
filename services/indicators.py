@@ -7,7 +7,7 @@ Provides: RSI, Bollinger Bands, MACD, ATR, OBV, Squeeze Detection,
 Quantitative Confidence Scoring, and Signal Classification.
 """
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
