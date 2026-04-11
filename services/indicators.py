@@ -99,20 +99,25 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD"], df["MACD_SIGNAL_LINE"], df["MACD_HISTOGRAM"] = macd, sig, hist
     df["ATR"] = calculate_atr(df)
     df["OBV"] = calculate_obv(df)
+    df["CHANDELIER_EXIT"] = df["high"].rolling(window=22, min_periods=1).max() - (2.5 * df["ATR"])
     return df
 
 # ---------------------------------------------------------------------------
-# Buy-The-Dip Signal
+# Buy-The-Dip Signal & MTF Confluence
 # ---------------------------------------------------------------------------
 
 def check_buy_signal(
-    df: pd.DataFrame, bb_buffer: float = BB_BUFFER
-) -> Tuple[bool, Dict[str, float]]:
+    df: pd.DataFrame, 
+    df_4h: Optional[pd.DataFrame] = None, 
+    df_1h: Optional[pd.DataFrame] = None,
+    bb_buffer: float = BB_BUFFER
+) -> Tuple[bool, Dict[str, float], bool]:
     """
     Classic dip confluence: RSI < 30, price ≤ lower BB + buffer, MACD momentum improving.
+    Returns: (is_triggered, values_dict, is_mtf_aplus_setup)
     """
     if len(df) < 2:
-        return False, {}
+        return False, {}, False
 
     latest, previous = df.iloc[-1], df.iloc[-2]
     price = latest["close"]
@@ -129,6 +134,17 @@ def check_buy_signal(
         and macd_hist > prev_hist
     )
 
+    # MTF Confluence Engine (A+ Setup)
+    is_aplus = False
+    if triggered and df_4h is not None and df_1h is not None and len(df_4h) > 0 and len(df_1h) > 0:
+        latest_4h = df_4h.iloc[-1]
+        latest_1h = df_1h.iloc[-1]
+        
+        # A+ Setup requires strong immediate momentum forming on lower timeframes:
+        # e.g., MACD Histogram on 4H and 1H both positive or aggressively improving
+        if latest_4h["MACD_HISTOGRAM"] > -0.1 and latest_1h["MACD_HISTOGRAM"] > 0 and latest_1h["RSI"] > 40:
+            is_aplus = True
+
     vals = {
         "price": float(price),
         "rsi": float(rsi),
@@ -138,8 +154,9 @@ def check_buy_signal(
         "macd_histogram": float(macd_hist),
         "previous_macd_histogram": float(prev_hist),
         "price_vs_bb": float(price_vs_bb),
+        "chandelier_exit": float(latest.get("CHANDELIER_EXIT", 0))
     }
-    return triggered, vals
+    return triggered, vals, is_aplus
 
 # ---------------------------------------------------------------------------
 # Quantitative Confidence Scoring (0-100%)
@@ -190,13 +207,12 @@ def calculate_confidence_score(
 # Signal Label & Sort Order
 # ---------------------------------------------------------------------------
 
-SIGNAL_SORT_ORDER = {"BUY": 0, "WATCH": 1, "NEUTRAL": 2, "WEAK": 3}
+SIGNAL_SORT_ORDER = {"BUY (A+)": 0, "BUY": 1, "WATCH": 2, "NEUTRAL": 3, "WEAK": 4}
 
-
-def get_signal_label(score: float, buy_signal: bool) -> str:
+def get_signal_label(score: float, buy_signal: bool, is_aplus: bool = False) -> str:
     """Classify the confidence score into a signal tier."""
     if buy_signal or score >= 70:
-        return "BUY"
+        return "BUY (A+)" if is_aplus else "BUY"
     if score >= 40:
         return "WATCH"
     if score >= 20:

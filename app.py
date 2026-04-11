@@ -389,7 +389,9 @@ with tab_dash:
         for ticker, d in data.items():
             rows.append({
                 "Ticker": ticker,
+                "Sector": d.get("sector", "Other"),
                 "Price (RUB)": round(d["price"], 2),
+                "Chandelier (₽)": round(d.get("chandelier_exit", 0), 2),
                 "RSI": round(d["rsi"], 1),
                 "vs BB (%)": round(d["price_to_bb"], 1),
                 "Vol %": round(d["volume_ratio"], 0),
@@ -419,6 +421,7 @@ with tab_dash:
             .bar(subset=["Vol %"], color='#00e5ff', vmin=0, vmax=300)
             .format({
                 "Price (RUB)": "{:,.2f}",
+                "Chandelier (₽)": "{:,.2f}",
                 "RSI": "{:.1f}",
                 "vs BB (%)": "{:.1f}%",
                 "Vol %": "{:.0f}%",
@@ -948,12 +951,14 @@ with tab_logs:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# AUTO-SCAN LOOP
+# AUTO-SCAN LOOP (Non-Blocking)
 # ═════════════════════════════════════════════════════════════════════
 if auto_scan and token and selected_tickers:
     placeholder = st.empty()
     placeholder.info(f"⚡ Auto-refresh active — next scan in {scan_interval}s")
-    log(f"Auto-scan sleeping {scan_interval}s")
-    time.sleep(scan_interval)
-    st.cache_data.clear()
-    st.rerun()
+    
+    # Non-blocking browser reload (bypasses python GIL sleep locks)
+    st.components.v1.html(
+        f'<script>setTimeout(function(){{ window.parent.location.reload(); }}, {scan_interval * 1000});</script>',
+        height=0, width=0,
+    )

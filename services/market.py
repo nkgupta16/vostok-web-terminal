@@ -112,6 +112,32 @@ DEFAULT_TICKERS: Dict[str, str] = {
     "SELG": "0d28c01b-f841-4e89-9c92-0ee23d12883a",
 }
 
+TICKER_SECTORS: Dict[str, str] = {
+    "SBER": "Financials", "SBERP": "Financials", "VTBR": "Financials", "TCSG": "Financials",
+    "BSPB": "Financials", "MBNK": "Financials", "SFIN": "Financials", "MOEX": "Financials",
+    "RENI": "Financials", "CBOM": "Financials", "SVCB": "Financials", "LEAS": "Financials",
+    "GAZP": "Energy", "LKOH": "Energy", "ROSN": "Energy", "NVTK": "Energy",
+    "SNGS": "Energy", "SNGSP": "Energy", "RNFT": "Energy", "TATN": "Energy", "TATNP": "Energy",
+    "BANE": "Energy", "BANEP": "Energy", "TRNFP": "Energy",
+    "GMKN": "Materials", "NLMK": "Materials", "MAGN": "Materials", "CHMF": "Materials",
+    "RUAL": "Materials", "PLZL": "Materials", "UGLD": "Materials", "SELG": "Materials",
+    "PHOR": "Materials", "ALRS": "Materials", "ENPG": "Materials", "MTLR": "Materials",
+    "MTLRP": "Materials", "RASP": "Materials",
+    "MTSS": "IT & Telecom", "RTKM": "IT & Telecom", "RTKMP": "IT & Telecom",
+    "YDEX": "IT & Telecom", "OZON": "IT & Telecom", "VKCO": "IT & Telecom", "POSI": "IT & Telecom",
+    "ASTR": "IT & Telecom", "HEAD": "IT & Telecom", "CIAN": "IT & Telecom",
+    "PIKK": "Real Estate", "SMLT": "Real Estate", "ETLN": "Real Estate", "LSRG": "Real Estate",
+    "MGNT": "Consumer", "X5": "Consumer", "FIVE": "Consumer", "MVID": "Consumer",
+    "BELU": "Consumer", "MDMG": "Consumer", "HNFG": "Consumer", "LENT": "Consumer",
+    "AQUA": "Consumer", "GCHE": "Consumer",
+    "AFLT": "Transport", "FESH": "Transport", "FLOT": "Transport", "GLTR": "Transport",
+    "IRAO": "Utilities", "FEES": "Utilities", "TGKA": "Utilities", "TGKB": "Utilities",
+    "MSNG": "Utilities", "UPRO": "Utilities"
+}
+
+def get_sector(ticker: str) -> str:
+    return TICKER_SECTORS.get(ticker, "Other")
+
 CANDLES_COUNT = 50  # Daily candles to fetch for dashboard
 SQUEEZE_CANDLES = 150  # More data needed for reliable squeeze percentiles
 
@@ -180,16 +206,19 @@ def fetch_all_moex_shares(token: str) -> Dict[str, dict]:
 # Data Fetching
 # ---------------------------------------------------------------------------
 
-def fetch_lot_sizes(client: Client, tickers: Dict[str, str]) -> Dict[str, int]:
-    """Fetch MOEX lot sizes for given tickers."""
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_lot_sizes(_token: str, tickers_tuple: tuple) -> Dict[str, int]:
+    """Fetch MOEX lot sizes for given tickers (cached 24h)."""
     lot_sizes: Dict[str, int] = {}
+    tickers = dict(tickers_tuple)
     try:
-        resp = client.instruments.shares(
-            instrument_status=InstrumentStatus.INSTRUMENT_STATUS_BASE
-        )
-        for share in resp.instruments:
-            if share.ticker in tickers:
-                lot_sizes[share.ticker] = getattr(share, "lot", 1) or 1
+        with Client(_token) as client:
+            resp = client.instruments.shares(
+                instrument_status=InstrumentStatus.INSTRUMENT_STATUS_BASE
+            )
+            for share in resp.instruments:
+                if share.ticker in tickers:
+                    lot_sizes[share.ticker] = getattr(share, "lot", 1) or 1
     except Exception:
         for t in tickers:
             lot_sizes[t] = 1
@@ -204,26 +233,39 @@ def run_coro_sync(coro_func, *args):
         future = executor.submit(_run)
         return future.result()
 
-async def fetch_candles_async(client: AsyncClient, uid: str, days: int = CANDLES_COUNT) -> list:
-    """Fetch last *days* daily candles for an instrument UID asynchronously."""
-    try:
-        from_time = now() - timedelta(days=days + 10)
-        to_time = now()
-        candles = []
-        async for c in client.get_all_candles(
-            instrument_id=uid,
-            from_=from_time,
-            to=to_time,
-            interval=CandleInterval.CANDLE_INTERVAL_DAY,
-        ):
-            candles.append(c)
-            
-        if len(candles) > days:
-            candles = candles[-days:]
-        return candles
-    except Exception as e:
-        logger.error(f"Failed to fetch candles for UID {uid}: {e}")
-        return []
+async def fetch_candles_async(client: AsyncClient, uid: str, days: int = CANDLES_COUNT) -> dict:
+    """Fetch 1H, 4H, and 1D candles for an instrument UID asynchronously."""
+    async def _fetch_interval(interval_enum, days_back, max_candles):
+        try:
+            from_time = now() - timedelta(days=days_back)
+            to_time = now()
+            candles = []
+            async for c in client.get_all_candles(
+                instrument_id=uid,
+                from_=from_time,
+                to=to_time,
+                interval=interval_enum,
+            ):
+                candles.append(c)
+            # Retain only the most recent requested buffer for performance
+            if len(candles) > max_candles:
+                candles = candles[-max_candles:]
+            return candles
+        except Exception as e:
+            return []
+
+    # Map intervals to fetch params. 1H needs ~5 days, 4H needs ~15, 1D needs `days`
+    results = await asyncio.gather(
+        _fetch_interval(CandleInterval.CANDLE_INTERVAL_DAY, days + 10, days),
+        _fetch_interval(CandleInterval.CANDLE_INTERVAL_4_HOUR, 30, 60),
+        _fetch_interval(CandleInterval.CANDLE_INTERVAL_HOUR, 10, 60)
+    )
+    
+    return {
+        "1D": results[0],
+        "4H": results[1],
+        "1H": results[2]
+    }
 
 # ---------------------------------------------------------------------------
 # Full Market Scan
@@ -233,12 +275,17 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
     results = {}
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
         try:
-            candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
-            if not candles or len(candles) < 2:
+            mtf_candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
+            candles_1d = mtf_candles.get("1D", [])
+            candles_4h = mtf_candles.get("4H", [])
+            candles_1h = mtf_candles.get("1H", [])
+
+            if not candles_1d or len(candles_1d) < 2:
                 return
 
-            df = prepare_candle_data(candles)
-            df = calculate_indicators(df)
+            df = calculate_indicators(prepare_candle_data(candles_1d))
+            df_4h = calculate_indicators(prepare_candle_data(candles_4h)) if len(candles_4h) > 1 else None
+            df_1h = calculate_indicators(prepare_candle_data(candles_1h)) if len(candles_1h) > 1 else None
 
             latest = df.iloc[-1]
             previous = df.iloc[-2]
@@ -266,7 +313,7 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                 else 0.0
             )
 
-            signal, _ = check_buy_signal(df, bb_buffer=BB_BUFFER)
+            is_buy, _, is_aplus = check_buy_signal(df, df_4h=df_4h, df_1h=df_1h, bb_buffer=BB_BUFFER)
 
             confidence = calculate_confidence_score(
                 rsi=rsi,
@@ -278,7 +325,7 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                 macd_change=macd_change,
             )
 
-            label = get_signal_label(confidence, signal)
+            label = get_signal_label(confidence, is_buy, is_aplus)
 
             results[ticker] = {
                 "price": price,
@@ -290,10 +337,12 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                 "macd_change": macd_change,
                 "volume_ratio": vol_ratio,
                 "price_to_bb": price_to_bb,
-                "signal": signal,
+                "signal": is_buy,
                 "confidence": confidence,
                 "label": label,
                 "lot_size": lot_sizes.get(ticker, 1),
+                "sector": get_sector(ticker),
+                "chandelier_exit": float(latest.get("CHANDELIER_EXIT", 0)),
                 "df": df,
             }
         except Exception as e:
@@ -311,8 +360,7 @@ def scan_market(_token: str, _tickers_tuple: tuple) -> Dict[str, dict]:
     Uses async API to fetch all selected tickers concurrently.
     """
     tickers = dict(_tickers_tuple)
-    with Client(_token) as sync_client:
-        lot_sizes = fetch_lot_sizes(sync_client, tickers)
+    lot_sizes = fetch_lot_sizes(_token, _tickers_tuple)
         
     return run_coro_sync(_scan_market_batch, _token, tickers, lot_sizes)
 
