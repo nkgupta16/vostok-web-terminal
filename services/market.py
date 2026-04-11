@@ -17,6 +17,8 @@ import streamlit as st
 from loguru import logger
 
 from t_tech.invest import Client, AsyncClient, CandleInterval, InstrumentStatus
+from t_tech.invest.retrying.aio.client import AsyncRetryingClient
+from t_tech.invest.retrying.settings import RetryClientSettings
 from t_tech.invest.utils import now
 
 from services.indicators import (
@@ -273,26 +275,26 @@ async def fetch_candles_async(client: AsyncClient, uid: str, days: int = CANDLES
 
 async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict:
     results = {}
-    sem = asyncio.Semaphore(12)  # Throttle MTF concurrent blasts
-    
+
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
-        async with sem:
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
                 mtf_candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
                 candles_1d = mtf_candles.get("1D", [])
                 candles_4h = mtf_candles.get("4H", [])
                 candles_1h = mtf_candles.get("1H", [])
-    
+
                 if not candles_1d or len(candles_1d) < 2:
                     return
-    
+
                 df = calculate_indicators(prepare_candle_data(candles_1d))
                 df_4h = calculate_indicators(prepare_candle_data(candles_4h)) if len(candles_4h) > 1 else None
                 df_1h = calculate_indicators(prepare_candle_data(candles_1h)) if len(candles_1h) > 1 else None
-    
+
                 latest = df.iloc[-1]
                 previous = df.iloc[-2]
-    
+
                 price = float(latest["close"])
                 rsi = float(latest["RSI"])
                 bb_lower = float(latest["BB_LOWER"])
@@ -300,14 +302,14 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                 macd_hist = float(latest["MACD_HISTOGRAM"])
                 prev_hist = float(previous["MACD_HISTOGRAM"])
                 vol = float(latest["volume"])
-    
+
                 # Volume ratio vs 10d average
                 if len(df) >= 10:
                     avg_vol = float(df["volume"].iloc[-11:-1].mean())
                     vol_ratio = (vol / avg_vol) * 100 if avg_vol > 0 else 100.0
                 else:
                     vol_ratio = 100.0
-    
+
                 # Derived metrics
                 price_to_bb = ((price - bb_lower) / bb_lower) * 100 if bb_lower else 0
                 macd_change = (
@@ -315,9 +317,9 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                     if prev_hist != 0
                     else 0.0
                 )
-    
+
                 is_buy, _, is_aplus = check_buy_signal(df, df_4h=df_4h, df_1h=df_1h, bb_buffer=BB_BUFFER)
-    
+
                 confidence = calculate_confidence_score(
                     rsi=rsi,
                     price=price,
@@ -327,9 +329,9 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                     macd_hist=macd_hist,
                     macd_change=macd_change,
                 )
-    
+
                 label = get_signal_label(confidence, is_buy, is_aplus)
-    
+
                 results[ticker] = {
                     "price": price,
                     "rsi": rsi,
@@ -348,15 +350,35 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                     "chandelier_exit": float(latest.get("CHANDELIER_EXIT", 0)),
                     "df": df,
                 }
+                return  # Success
             except Exception as e:
-                logger.error(f"Market scan error for {ticker}: {e}")
+                err_str = str(e)
+                if "RESOURCE_EXHAUSTED" in err_str:
+                    wait = 5
+                    try:
+                        from t_tech.invest.logging import get_metadata_from_aio_error
+                        metadata = get_metadata_from_aio_error(e)
+                        if metadata and metadata.ratelimit_reset:
+                            wait = int(metadata.ratelimit_reset) + 1
+                    except Exception:
+                        pass
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Rate limited on {ticker}, waiting {wait}s (attempt {attempt+1}/{max_retries})")
+                        await asyncio.sleep(wait)
+                    else:
+                        logger.error(f"Market scan error for {ticker}: exhausted {max_retries} retries")
+                else:
+                    logger.error(f"Market scan error for {ticker}: {e}")
+                    return
 
     async with AsyncClient(token) as client:
-        tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
+        items = list(tickers.items())
         batch_size = 5
-        for i in range(0, len(tasks), batch_size):
-            await asyncio.gather(*tasks[i:i+batch_size])
-            if i + batch_size < len(tasks):
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
+            tasks = [process_ticker(client, t, u) for t, u in batch]
+            await asyncio.gather(*tasks)
+            if i + batch_size < len(items):
                 await asyncio.sleep(1.5)
     return results
 
@@ -380,38 +402,61 @@ async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
     results = {}
 
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
-        try:
-            to_time = now()
-            from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
-            candles = []
-            async for c in client.get_all_candles(
-                instrument_id=uid,
-                from_=from_time,
-                to=to_time,
-                interval=CandleInterval.CANDLE_INTERVAL_DAY,
-            ):
-                candles.append(c)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                to_time = now()
+                from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
+                candles = []
+                async for c in client.get_all_candles(
+                    instrument_id=uid,
+                    from_=from_time,
+                    to=to_time,
+                    interval=CandleInterval.CANDLE_INTERVAL_DAY,
+                ):
+                    candles.append(c)
 
-            if len(candles) < 30:
-                return
+                if len(candles) < 30:
+                    return
 
-            df = prepare_candle_data(candles)
-            df = calculate_indicators(df)
-            metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
+                df = prepare_candle_data(candles)
+                df = calculate_indicators(df)
+                metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
 
-            results[ticker] = {
-                "price": float(df.iloc[-1]["close"]),
-                "metrics": metrics,
-            }
-        except Exception as e:
-            logger.error(f"Squeeze scan error for {ticker}: {e}")
+                results[ticker] = {
+                    "price": float(df.iloc[-1]["close"]),
+                    "metrics": metrics,
+                }
+                return  # Success
+            except Exception as e:
+                err_str = str(e)
+                if "RESOURCE_EXHAUSTED" in err_str:
+                    # Parse ratelimit_reset from metadata (T-Bank SDK pattern)
+                    wait = 5
+                    try:
+                        from t_tech.invest.logging import get_metadata_from_aio_error
+                        metadata = get_metadata_from_aio_error(e)
+                        if metadata and metadata.ratelimit_reset:
+                            wait = int(metadata.ratelimit_reset) + 1
+                    except Exception:
+                        pass
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Rate limited on {ticker}, waiting {wait}s (attempt {attempt+1}/{max_retries})")
+                        await asyncio.sleep(wait)
+                    else:
+                        logger.error(f"Squeeze scan error for {ticker}: exhausted {max_retries} retries")
+                else:
+                    logger.error(f"Squeeze scan error for {ticker}: {e}")
+                    return  # Non-retryable error
 
     async with AsyncClient(token) as client:
-        tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
+        items = list(tickers.items())
         batch_size = 5
-        for i in range(0, len(tasks), batch_size):
-            await asyncio.gather(*tasks[i:i + batch_size])
-            if i + batch_size < len(tasks):
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
+            tasks = [process_ticker(client, t, u) for t, u in batch]
+            await asyncio.gather(*tasks)
+            if i + batch_size < len(items):
                 await asyncio.sleep(1.5)
     return results
 
