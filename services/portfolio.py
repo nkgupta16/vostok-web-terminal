@@ -244,17 +244,21 @@ def fetch_dividends(
 
 from loguru import logger
 
-def sandbox_init(_token: str) -> str:
-    """Create a sandbox account or return existing one to avoid 35001 error."""
+def get_all_sandbox_accounts(_token: str) -> List[str]:
+    """Return a list of all sandbox account IDs."""
     try:
         with Client(_token) as client:
             accounts = client.sandbox.get_sandbox_accounts()
-            if len(accounts.accounts) > 0:
-                active_account = accounts.accounts[0].id
-                logger.info(f"Sandbox init: Found existing account {active_account}")
-                return active_account
-                
-            logger.info("Sandbox init: No account found, creating new VostokWeb sandbox account.")
+            return [acc.id for acc in accounts.accounts]
+    except Exception as e:
+        logger.error(f"Sandbox list error: {e}")
+        return []
+
+def sandbox_init(_token: str) -> str:
+    """Create a new sandbox account."""
+    try:
+        with Client(_token) as client:
+            logger.info("Sandbox init: creating new VostokWeb sandbox account.")
             resp = client.sandbox.open_sandbox_account(name="VostokWeb")
             return resp.account_id
     except Exception as e:

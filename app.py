@@ -40,6 +40,7 @@ from services.market import (
 from services.portfolio import (
     fetch_portfolio,
     fetch_dividends,
+    get_all_sandbox_accounts,
     sandbox_init,
     sandbox_deposit,
 )
@@ -414,10 +415,23 @@ with tab_dash:
             except:
                 return ''
 
+        def _color_signal(val):
+            v = str(val).upper()
+            if "BUY" in v:
+                return 'color: #00ff88; font-weight: bold'
+            elif "WATCH" in v:
+                return 'color: #ffaa00; font-weight: bold'
+            elif "NEUTRAL" in v:
+                return 'color: #7a8a9e'
+            elif "WEAK" in v or "SELL" in v:
+                return 'color: #ff4b4b; font-weight: bold'
+            return ''
+
         styled_df = (
             df_display.style
             .background_gradient(subset=["RSI"], cmap="RdYlGn", vmin=20, vmax=80)
             .map(_color_macd, subset=["MACD Δ (%)"])
+            .map(_color_signal, subset=["Signal"])
             .bar(subset=["Vol %"], color='#00e5ff', vmin=0, vmax=300)
             .format({
                 "Price (RUB)": "{:,.2f}",
@@ -736,39 +750,52 @@ with tab_sandbox:
             unsafe_allow_html=True,
         )
 
-        sc1, sc2, sc3 = st.columns(3)
-
+        # Sandbox Account Selection UI
+        accounts = get_all_sandbox_accounts(token)
+        
+        sc1, sc2 = st.columns([2, 1])
         with sc1:
-            if st.button("🏗️ Initialize Sandbox", type="primary", key="sb_init"):
+            if accounts:
+                selected_acc = st.selectbox(
+                    "Active Sandbox Accounts", 
+                    options=accounts,
+                    index=accounts.index(st.session_state["sandbox_account_id"]) if st.session_state.get("sandbox_account_id") in accounts else 0
+                )
+                if selected_acc:
+                    st.session_state["sandbox_account_id"] = selected_acc
+            else:
+                st.info("No Sandbox accounts found.")
+                st.session_state["sandbox_account_id"] = None
+        
+        with sc2:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("➕ Create New Sandbox Account", type="primary", use_container_width=True):
                 try:
-                    acc_id = sandbox_init(token)
-                    st.session_state["sandbox_account_id"] = acc_id
-                    st.success(f"Created: `{acc_id}`")
-                    log(f"Sandbox created: {acc_id}")
+                    with st.spinner("Creating account..."):
+                        acc_id = sandbox_init(token)
+                        if acc_id:
+                            st.session_state["sandbox_account_id"] = acc_id
+                            st.success(f"Created: `{acc_id}`")
+                            log(f"Sandbox created: {acc_id}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to create Sandbox (Limit Reached).")
                 except Exception as e:
                     st.error(f"Error: {e}")
                     log(f"Sandbox init error: {e}", "ERROR")
 
-        with sc2:
+        if st.session_state.get("sandbox_account_id"):
+            st.markdown(f"**Status:** 🟢 Account `{st.session_state['sandbox_account_id']}` is active")
             if st.button("💰 Deposit 100K RUB", key="sb_deposit"):
-                acc_id = st.session_state.get("sandbox_account_id")
-                if not acc_id:
-                    st.warning("Initialize sandbox first!")
-                else:
-                    try:
-                        sandbox_deposit(token, acc_id)
-                        st.success("Deposited ₽100,000")
-                        log(f"Sandbox deposit: 100K RUB → {acc_id}")
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-                        log(f"Sandbox deposit error: {e}", "ERROR")
-
-        with sc3:
-            sandbox_status = st.session_state.get("sandbox_account_id")
-            if sandbox_status:
-                st.markdown(f"**Account:** `{sandbox_status}` — 🟢 Active")
-            else:
-                st.markdown("**Status:** 🔴 Inactive")
+                try:
+                    sandbox_deposit(token, st.session_state["sandbox_account_id"])
+                    st.success("Deposited ₽100,000")
+                    log(f"Sandbox deposit: 100K RUB → {st.session_state['sandbox_account_id']}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                    log(f"Sandbox deposit error: {e}", "ERROR")
+        else:
+            st.markdown("**Status:** 🔴 Inactive")
 
         # Paper-trade BUY signals
         st.markdown("#### 📋 Paper Trade BUY Signals")
