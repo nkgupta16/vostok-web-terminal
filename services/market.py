@@ -280,74 +280,74 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
             try:
                 mtf_candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
                 candles_1d = mtf_candles.get("1D", [])
-            candles_4h = mtf_candles.get("4H", [])
-            candles_1h = mtf_candles.get("1H", [])
-
-            if not candles_1d or len(candles_1d) < 2:
-                return
-
-            df = calculate_indicators(prepare_candle_data(candles_1d))
-            df_4h = calculate_indicators(prepare_candle_data(candles_4h)) if len(candles_4h) > 1 else None
-            df_1h = calculate_indicators(prepare_candle_data(candles_1h)) if len(candles_1h) > 1 else None
-
-            latest = df.iloc[-1]
-            previous = df.iloc[-2]
-
-            price = float(latest["close"])
-            rsi = float(latest["RSI"])
-            bb_lower = float(latest["BB_LOWER"])
-            bb_upper = float(latest["BB_UPPER"])
-            macd_hist = float(latest["MACD_HISTOGRAM"])
-            prev_hist = float(previous["MACD_HISTOGRAM"])
-            vol = float(latest["volume"])
-
-            # Volume ratio vs 10d average
-            if len(df) >= 10:
-                avg_vol = float(df["volume"].iloc[-11:-1].mean())
-                vol_ratio = (vol / avg_vol) * 100 if avg_vol > 0 else 100.0
-            else:
-                vol_ratio = 100.0
-
-            # Derived metrics
-            price_to_bb = ((price - bb_lower) / bb_lower) * 100 if bb_lower else 0
-            macd_change = (
-                ((macd_hist - prev_hist) / abs(prev_hist)) * 100
-                if prev_hist != 0
-                else 0.0
-            )
-
-            is_buy, _, is_aplus = check_buy_signal(df, df_4h=df_4h, df_1h=df_1h, bb_buffer=BB_BUFFER)
-
-            confidence = calculate_confidence_score(
-                rsi=rsi,
-                price=price,
-                bb_lower=bb_lower,
-                bb_upper=bb_upper,
-                volume_ratio=vol_ratio,
-                macd_hist=macd_hist,
-                macd_change=macd_change,
-            )
-
-            label = get_signal_label(confidence, is_buy, is_aplus)
-
-            results[ticker] = {
-                "price": price,
-                "rsi": rsi,
-                "bb_lower": bb_lower,
-                "bb_upper": bb_upper,
-                "bb_middle": float(latest["BB_MIDDLE"]),
-                "macd_hist": macd_hist,
-                "macd_change": macd_change,
-                "volume_ratio": vol_ratio,
-                "price_to_bb": price_to_bb,
-                "signal": is_buy,
-                "confidence": confidence,
-                "label": label,
-                "lot_size": lot_sizes.get(ticker, 1),
-                "sector": get_sector(ticker),
-                "chandelier_exit": float(latest.get("CHANDELIER_EXIT", 0)),
-                "df": df,
-            }
+                candles_4h = mtf_candles.get("4H", [])
+                candles_1h = mtf_candles.get("1H", [])
+    
+                if not candles_1d or len(candles_1d) < 2:
+                    return
+    
+                df = calculate_indicators(prepare_candle_data(candles_1d))
+                df_4h = calculate_indicators(prepare_candle_data(candles_4h)) if len(candles_4h) > 1 else None
+                df_1h = calculate_indicators(prepare_candle_data(candles_1h)) if len(candles_1h) > 1 else None
+    
+                latest = df.iloc[-1]
+                previous = df.iloc[-2]
+    
+                price = float(latest["close"])
+                rsi = float(latest["RSI"])
+                bb_lower = float(latest["BB_LOWER"])
+                bb_upper = float(latest["BB_UPPER"])
+                macd_hist = float(latest["MACD_HISTOGRAM"])
+                prev_hist = float(previous["MACD_HISTOGRAM"])
+                vol = float(latest["volume"])
+    
+                # Volume ratio vs 10d average
+                if len(df) >= 10:
+                    avg_vol = float(df["volume"].iloc[-11:-1].mean())
+                    vol_ratio = (vol / avg_vol) * 100 if avg_vol > 0 else 100.0
+                else:
+                    vol_ratio = 100.0
+    
+                # Derived metrics
+                price_to_bb = ((price - bb_lower) / bb_lower) * 100 if bb_lower else 0
+                macd_change = (
+                    ((macd_hist - prev_hist) / abs(prev_hist)) * 100
+                    if prev_hist != 0
+                    else 0.0
+                )
+    
+                is_buy, _, is_aplus = check_buy_signal(df, df_4h=df_4h, df_1h=df_1h, bb_buffer=BB_BUFFER)
+    
+                confidence = calculate_confidence_score(
+                    rsi=rsi,
+                    price=price,
+                    bb_lower=bb_lower,
+                    bb_upper=bb_upper,
+                    volume_ratio=vol_ratio,
+                    macd_hist=macd_hist,
+                    macd_change=macd_change,
+                )
+    
+                label = get_signal_label(confidence, is_buy, is_aplus)
+    
+                results[ticker] = {
+                    "price": price,
+                    "rsi": rsi,
+                    "bb_lower": bb_lower,
+                    "bb_upper": bb_upper,
+                    "bb_middle": float(latest["BB_MIDDLE"]),
+                    "macd_hist": macd_hist,
+                    "macd_change": macd_change,
+                    "volume_ratio": vol_ratio,
+                    "price_to_bb": price_to_bb,
+                    "signal": is_buy,
+                    "confidence": confidence,
+                    "label": label,
+                    "lot_size": lot_sizes.get(ticker, 1),
+                    "sector": get_sector(ticker),
+                    "chandelier_exit": float(latest.get("CHANDELIER_EXIT", 0)),
+                    "df": df,
+                }
         except Exception as e:
             logger.error(f"Market scan error for {ticker}: {e}")
 
