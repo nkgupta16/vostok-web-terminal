@@ -381,28 +381,28 @@ async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
             try:
                 to_time = now()
                 from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
-            candles = []
-            async for c in client.get_all_candles(
-                instrument_id=uid,
-                from_=from_time,
-                to=to_time,
-                interval=CandleInterval.CANDLE_INTERVAL_DAY,
-            ):
-                candles.append(c)
-                
-            if len(candles) < 30:
-                return
-
-            df = prepare_candle_data(candles)
-            df = calculate_indicators(df)
-            metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
-
-            results[ticker] = {
-                "price": float(df.iloc[-1]["close"]),
-                "metrics": metrics,
-            }
-        except Exception as e:
-            logger.error(f"Squeeze scan error for {ticker}: {e}")
+                candles = []
+                async for c in client.get_all_candles(
+                    instrument_id=uid,
+                    from_=from_time,
+                    to=to_time,
+                    interval=CandleInterval.CANDLE_INTERVAL_DAY,
+                ):
+                    candles.append(c)
+                    
+                if len(candles) < 30:
+                    return
+    
+                df = prepare_candle_data(candles)
+                df = calculate_indicators(df)
+                metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
+    
+                results[ticker] = {
+                    "price": float(df.iloc[-1]["close"]),
+                    "metrics": metrics,
+                }
+            except Exception as e:
+                logger.error(f"Squeeze scan error for {ticker}: {e}")
 
     async with AsyncClient(token) as client:
         tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
