@@ -220,10 +220,10 @@ current_selected = get_selected_tickers()
 
 # Quick select/deselect
 tc1, tc2 = st.sidebar.columns(2)
-if tc1.button("✅ All", key="sel_all", use_container_width=True):
+if tc1.button("✅ All", key="sel_all", width="stretch"):
     st.session_state["selected_tickers"] = list(all_tickers.keys())
     st.rerun()
-if tc2.button("❌ None", key="sel_none", use_container_width=True):
+if tc2.button("❌ None", key="sel_none", width="stretch"):
     st.session_state["selected_tickers"] = []
     st.rerun()
 
@@ -245,7 +245,7 @@ with st.sidebar.expander("➕ Add / Remove Tickers"):
     st.caption("UID is auto-detected from T-Bank API")
 
     ac1, ac2 = st.columns(2)
-    if ac1.button("➕ Add", key="add_ticker", use_container_width=True):
+    if ac1.button("➕ Add", key="add_ticker", width="stretch"):
         t = new_ticker.strip().upper()
         if not t:
             st.warning("Enter a ticker symbol.")
@@ -283,7 +283,7 @@ with st.sidebar.expander("➕ Add / Remove Tickers"):
                 st.error(f"❌ Ticker '{t}' not found on MOEX via T-Bank API.")
 
     remove_ticker = st.selectbox("Remove Ticker", options=[""] + sorted(all_tickers.keys()), key="rm_ticker")
-    if ac2.button("🗑️ Remove", key="rm_btn", use_container_width=True):
+    if ac2.button("🗑️ Remove", key="rm_btn", width="stretch"):
         if remove_ticker and remove_ticker in all_tickers:
             del all_tickers[remove_ticker]
             st.session_state["tickers"] = all_tickers
@@ -404,15 +404,37 @@ with tab_dash:
         df_display.drop(columns=["_sort"], inplace=True)
         df_display.reset_index(drop=True, inplace=True)
 
+        def _color_macd(val):
+            try:
+                v = float(val)
+                color = '#00e676' if v > 0 else '#ff5252'
+                return f'color: {color}; font-weight: bold'
+            except:
+                return ''
+
+        styled_df = (
+            df_display.style
+            .background_gradient(subset=["RSI"], cmap="RdYlGn", vmin=20, vmax=80)
+            .map(_color_macd, subset=["MACD Δ (%)"])
+            .bar(subset=["Vol %"], color='#00e5ff', vmin=0, vmax=300)
+            .format({
+                "Price (RUB)": "{:,.2f}",
+                "RSI": "{:.1f}",
+                "vs BB (%)": "{:.1f}%",
+                "Vol %": "{:.0f}%",
+                "MACD Δ (%)": "{:.1f}%",
+            })
+        )
+
         st.dataframe(
-            df_display,
+            styled_df,
             column_config={
                 "Confidence": st.column_config.ProgressColumn(
                     "Confidence %", help="Weighted quantitative score (0-100)",
                     format="%.0f%%", min_value=0, max_value=100,
                 ),
             },
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
             height=min(600, 40 + 35 * len(df_display)),
         )
 
@@ -446,7 +468,7 @@ with tab_dash:
                 xaxis_rangeslider_visible=False, margin=dict(l=40, r=20, t=40, b=30),
                 font=dict(family="Inter, sans-serif", size=12, color="#e0e4ea"),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             fig_rsi = go.Figure()
             fig_rsi.add_trace(go.Scatter(x=list(range(len(chart_df))), y=chart_df["RSI"], name="RSI", line=dict(color="#00e5ff", width=2)))
@@ -458,7 +480,7 @@ with tab_dash:
                 yaxis=dict(range=[0, 100]), margin=dict(l=40, r=20, t=40, b=30),
                 font=dict(family="Inter, sans-serif", size=12, color="#e0e4ea"),
             )
-            st.plotly_chart(fig_rsi, use_container_width=True)
+            st.plotly_chart(fig_rsi, width="stretch")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -515,7 +537,7 @@ with tab_squeeze:
                 })
 
             df_sq = pd.DataFrame(rows_sq)
-            st.dataframe(df_sq, use_container_width=True, hide_index=True, height=min(600, 40 + 35 * len(df_sq)))
+            st.dataframe(df_sq, width="stretch", hide_index=True, height=min(600, 40 + 35 * len(df_sq)))
 
             st_copy_to_clipboard(
                 text=df_to_tsv(df_sq),
@@ -565,7 +587,7 @@ with tab_port:
                         "P&L": "₽ {:+,.0f}", "P&L %": "{:+.2f}%",
                         "Day P&L": "₽ {:+,.0f}", "Day P&L %": "{:+.2f}%", "Qty": "{:.0f}",
                     }),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
                 st_copy_to_clipboard(text=df_to_tsv(df_pos), before_copy_label="📋 Copy Positions", after_copy_label="✅ Copied!")
 
@@ -593,7 +615,7 @@ with tab_port:
                                 "MACD": md["macd_hist"], "RSI": md["rsi"], "Action": action
                             })
                     if health_rows:
-                        st.dataframe(pd.DataFrame(health_rows).style.format({"Conf %": "{:.0f}%", "MACD": "{:.2f}", "RSI": "{:.1f}"}), use_container_width=True, hide_index=True)
+                        st.dataframe(pd.DataFrame(health_rows).style.format({"Conf %": "{:.0f}%", "MACD": "{:.2f}", "RSI": "{:.1f}"}), width="stretch", hide_index=True)
                     else:
                         st.info("Scan missing these tickers.")
             else:
@@ -605,7 +627,7 @@ with tab_port:
                 df_ops.columns = ["Date", "Ticker", "Type", "Qty", "Price", "Amount"]
                 st.dataframe(
                     df_ops.style.format({"Price": "₽ {:.2f}", "Amount": "₽ {:+,.0f}", "Qty": "{:.0f}"}),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
                 st_copy_to_clipboard(text=df_to_tsv(df_ops), before_copy_label="📋 Copy Operations", after_copy_label="✅ Copied!")
             else:
@@ -673,7 +695,7 @@ with tab_divs:
                     },
                     na_rep="-",
                 ),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
             st_copy_to_clipboard(text=df_to_tsv(df_div), before_copy_label="📋 Copy Dividends", after_copy_label="✅ Copied!")
 
@@ -772,7 +794,7 @@ with tab_sandbox:
         if st.session_state.get("sandbox_orders"):
             st.markdown("#### 📜 Order History")
             df_sb = pd.DataFrame(st.session_state["sandbox_orders"])
-            st.dataframe(df_sb, use_container_width=True, hide_index=True)
+            st.dataframe(df_sb, width="stretch", hide_index=True)
             st_copy_to_clipboard(text=df_to_tsv(df_sb), before_copy_label="📋 Copy Orders", after_copy_label="✅ Copied!")
 
 
@@ -797,7 +819,7 @@ with tab_strat:
         bt_ticker = c2.selectbox("Target Asset", list(selected_tickers.keys()) if selected_tickers else ["SBER"], key="bt_ticker")
     with s2:
         st.markdown("<br>", unsafe_allow_html=True)
-        run_bt = st.button("▶ Run Backtest", type="primary", key="run_bt", use_container_width=True)
+        run_bt = st.button("▶ Run Backtest", type="primary", key="run_bt", width="stretch")
 
     if run_bt and token:
         st.session_state["backtest_ran"] = True
@@ -869,12 +891,12 @@ with tab_strat:
                 fig_eq = go.Figure()
                 fig_eq.add_trace(go.Scatter(y=equity, x=df.index, name="Equity", line=dict(color="#00e5ff", width=2.5), fill="tozeroy", fillcolor="rgba(0,229,255,0.06)"))
                 fig_eq.update_layout(title=f"{bt_ticker} — {strategy} Equity Curve", template="plotly_dark", paper_bgcolor="#0a0e12", plot_bgcolor="#0d1520", height=320, margin=dict(l=40, r=20, t=50, b=30), font=dict(family="Inter", size=12, color="#e0e4ea"), yaxis_title="₽")
-                st.plotly_chart(fig_eq, use_container_width=True)
+                st.plotly_chart(fig_eq, width="stretch")
 
                 fig_dd = go.Figure()
                 fig_dd.add_trace(go.Scatter(y=drawdown, x=df.index, name="Drawdown", line=dict(color="#ff5252", width=2), fill="tozeroy", fillcolor="rgba(255,82,82,0.12)"))
                 fig_dd.update_layout(title="Drawdown (%)", template="plotly_dark", paper_bgcolor="#0a0e12", plot_bgcolor="#0d1520", height=200, margin=dict(l=40, r=20, t=40, b=30), font=dict(family="Inter", size=12, color="#e0e4ea"), yaxis_title="%")
-                st.plotly_chart(fig_dd, use_container_width=True)
+                st.plotly_chart(fig_dd, width="stretch")
 
                 s1, s2, s3, s4 = st.columns(4)
                 s1.metric("Total Return", f"{total_ret:+.2f}%")
