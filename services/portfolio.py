@@ -246,16 +246,20 @@ from loguru import logger
 
 def sandbox_init(_token: str) -> str:
     """Create a sandbox account or return existing one to avoid 35001 error."""
-    with Client(_token) as client:
-        accounts = client.sandbox.get_sandbox_accounts()
-        if len(accounts.accounts) > 0:
-            active_account = accounts.accounts[0].id
-            logger.info(f"Sandbox init: Found existing account {active_account}")
-            return active_account
-            
-        logger.info("Sandbox init: No account found, creating new VostokWeb sandbox account.")
-        resp = client.sandbox.open_sandbox_account(name="VostokWeb")
-        return resp.account_id
+    try:
+        with Client(_token) as client:
+            accounts = client.sandbox.get_sandbox_accounts()
+            if len(accounts.accounts) > 0:
+                active_account = accounts.accounts[0].id
+                logger.info(f"Sandbox init: Found existing account {active_account}")
+                return active_account
+                
+            logger.info("Sandbox init: No account found, creating new VostokWeb sandbox account.")
+            resp = client.sandbox.open_sandbox_account(name="VostokWeb")
+            return resp.account_id
+    except Exception as e:
+        logger.error(f"Sandbox init error (likely 35001 limit): {e}")
+        return ""
 
 
 def sandbox_deposit(_token: str, account_id: str, amount: int = 100_000):
