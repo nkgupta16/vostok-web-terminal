@@ -378,41 +378,39 @@ def scan_market(_token: str, _tickers_tuple: tuple) -> Dict[str, dict]:
 
 async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
     results = {}
-    sem = asyncio.Semaphore(15) # Throttle squeeze 15 concurrent
 
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
-        async with sem:
-            try:
-                to_time = now()
-                from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
-                candles = []
-                async for c in client.get_all_candles(
-                    instrument_id=uid,
-                    from_=from_time,
-                    to=to_time,
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY,
-                ):
-                    candles.append(c)
-                    
-                if len(candles) < 30:
-                    return
-    
-                df = prepare_candle_data(candles)
-                df = calculate_indicators(df)
-                metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
-    
-                results[ticker] = {
-                    "price": float(df.iloc[-1]["close"]),
-                    "metrics": metrics,
-                }
-            except Exception as e:
-                logger.error(f"Squeeze scan error for {ticker}: {e}")
+        try:
+            to_time = now()
+            from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
+            candles = []
+            async for c in client.get_all_candles(
+                instrument_id=uid,
+                from_=from_time,
+                to=to_time,
+                interval=CandleInterval.CANDLE_INTERVAL_DAY,
+            ):
+                candles.append(c)
+
+            if len(candles) < 30:
+                return
+
+            df = prepare_candle_data(candles)
+            df = calculate_indicators(df)
+            metrics = calculate_squeeze_score(df, ATR_THRESHOLD)
+
+            results[ticker] = {
+                "price": float(df.iloc[-1]["close"]),
+                "metrics": metrics,
+            }
+        except Exception as e:
+            logger.error(f"Squeeze scan error for {ticker}: {e}")
 
     async with AsyncClient(token) as client:
         tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
         batch_size = 5
         for i in range(0, len(tasks), batch_size):
-            await asyncio.gather(*tasks[i:i+batch_size])
+            await asyncio.gather(*tasks[i:i + batch_size])
             if i + batch_size < len(tasks):
                 await asyncio.sleep(1.5)
     return results

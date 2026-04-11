@@ -572,6 +572,8 @@ with tab_squeeze:
                     "Alert": status,
                 })
 
+            df_sq = pd.DataFrame(rows_sq)
+
             styled_sq = (
                 df_sq.style
                 .background_gradient(subset=["BB Width %ile"], cmap="YlOrRd", vmin=0, vmax=100)
@@ -883,12 +885,12 @@ with tab_sandbox:
                         with col2:
                             lim_price = st.number_input("Limit Price", value=float(d["price"]), format="%.2f", disabled=(ord_type=="MARKET"), key=f"sb_price_{ticker}")
                         
-                        if st.button(f"🚀 Paper Execute {ticker}", key=f"sb_buy_{ticker}", disabled=not sandbox_status):
+                        sb_acc = st.session_state.get("sandbox_account_id")
+                        if st.button(f"🚀 Paper Execute {ticker}", key=f"sb_buy_{ticker}", disabled=not sb_acc):
                             try:
                                 uid = selected_tickers.get(ticker)
-                                # Note: sandbox_buy was renamed to sandbox_order
                                 from services.portfolio import sandbox_order
-                                order_id = sandbox_order(token, sandbox_status, uid, pos["lots"], ord_type, lim_price)
+                                order_id = sandbox_order(token, sb_acc, uid, pos["lots"], ord_type, lim_price)
                                 
                                 st.success(f"{ord_type} Order placed! ID: `{order_id}`")
                                 log(f"Sandbox {ord_type} BUY: {ticker} × {pos['lots']} lots @ {lim_price if ord_type == 'LIMIT' else 'MARKET'} — order {order_id}")
