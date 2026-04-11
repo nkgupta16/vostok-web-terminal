@@ -353,11 +353,11 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
 
     async with AsyncClient(token) as client:
         tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
-        batch_size = 10
+        batch_size = 5
         for i in range(0, len(tasks), batch_size):
             await asyncio.gather(*tasks[i:i+batch_size])
             if i + batch_size < len(tasks):
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.5)
     return results
 
 @st.cache_data(ttl=55, show_spinner=False)
@@ -410,11 +410,11 @@ async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
 
     async with AsyncClient(token) as client:
         tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
-        batch_size = 10
+        batch_size = 5
         for i in range(0, len(tasks), batch_size):
             await asyncio.gather(*tasks[i:i+batch_size])
             if i + batch_size < len(tasks):
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.5)
     return results
 
 @st.cache_data(ttl=55, show_spinner=False)

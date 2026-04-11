@@ -43,6 +43,7 @@ from services.portfolio import (
     get_all_sandbox_accounts,
     sandbox_init,
     sandbox_deposit,
+    close_sandbox_account,
 )
 from services.indicators import (
     get_signal_label,
@@ -427,11 +428,29 @@ with tab_dash:
                 return 'color: #ff4b4b; font-weight: bold'
             return ''
 
+        def _color_bb(val):
+            try:
+                if float(val) <= 2.0:
+                    return 'color: #ffaa00; font-weight: bold'
+            except:
+                pass
+            return ''
+
+        def _color_vol(val):
+            try:
+                if float(val) >= 150.0:
+                    return 'color: #00e5ff; font-weight: bold'
+            except:
+                pass
+            return ''
+
         styled_df = (
             df_display.style
             .background_gradient(subset=["RSI"], cmap="RdYlGn", vmin=20, vmax=80)
             .map(_color_macd, subset=["MACD Δ (%)"])
             .map(_color_signal, subset=["Signal"])
+            .map(_color_bb, subset=["vs BB (%)"])
+            .map(_color_vol, subset=["Vol %"])
             .bar(subset=["Vol %"], color='#00e5ff', vmin=0, vmax=300)
             .format({
                 "Price (RUB)": "{:,.2f}",
@@ -753,7 +772,7 @@ with tab_sandbox:
         # Sandbox Account Selection UI
         accounts = get_all_sandbox_accounts(token)
         
-        sc1, sc2 = st.columns([2, 1])
+        sc1, sc2, sc3 = st.columns([2, 1, 1])
         with sc1:
             if accounts:
                 selected_acc = st.selectbox(
@@ -769,7 +788,7 @@ with tab_sandbox:
         
         with sc2:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if st.button("➕ Create New Sandbox Account", type="primary", use_container_width=True):
+            if st.button("➕ Create New", type="primary", use_container_width=True):
                 try:
                     with st.spinner("Creating account..."):
                         acc_id = sandbox_init(token)
@@ -784,16 +803,62 @@ with tab_sandbox:
                     st.error(f"Error: {e}")
                     log(f"Sandbox init error: {e}", "ERROR")
 
+        with sc3:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            if st.session_state.get("sandbox_account_id"):
+                if st.button("🗑️ Delete Account", use_container_width=True):
+                    close_sandbox_account(token, st.session_state["sandbox_account_id"])
+                    st.session_state.pop("sandbox_account_id", None)
+                    st.rerun()
+
         if st.session_state.get("sandbox_account_id"):
             st.markdown(f"**Status:** 🟢 Account `{st.session_state['sandbox_account_id']}` is active")
+
+            with st.spinner("📂 Loading sandbox portfolio..."):
+                sf = fetch_portfolio(token, sandbox_account_id=st.session_state["sandbox_account_id"])
+
+            pc1, pc2, pc3, pc4 = st.columns(4)
+            pc1.metric("Total Value", f"₽ {sf.get('total_value', 0):,.0f}")
+            pc2.metric("Total P&L", f"₽ {sf.get('total_pnl', 0):,.0f}", delta=f"{sf.get('total_pnl', 0):+,.0f}")
+            pc3.metric("Day P&L", f"₽ {sf.get('day_pnl', 0):,.0f}", delta=f"{sf.get('day_pnl', 0):+,.0f}")
+            pc4.metric("Cash (RUB)", f"₽ {sf.get('cash', 0):,.0f}")
+
             if st.button("💰 Deposit 100K RUB", key="sb_deposit"):
                 try:
                     sandbox_deposit(token, st.session_state["sandbox_account_id"])
                     st.success("Deposited ₽100,000")
                     log(f"Sandbox deposit: 100K RUB → {st.session_state['sandbox_account_id']}")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Error: {e}")
                     log(f"Sandbox deposit error: {e}", "ERROR")
+            
+            st.markdown("#### 📊 Sandbox Positions")
+            if sf.get("positions"):
+                df_spos = pd.DataFrame(sf["positions"])
+                df_spos.columns = ["Ticker", "Qty", "Avg Price", "Last Price", "Value", "P&L", "P&L %", "Day P&L", "Day P&L %"]
+
+                def _style_spos(df):
+                    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+                    for idx, row in df.iterrows():
+                        c = "color: #00e676" if row["P&L"] >= 0 else "color: #ff5252"
+                        styles.loc[idx, "P&L"] = c + "; font-weight: 600"
+                        styles.loc[idx, "P&L %"] = c
+                        dc = "color: #00e676" if row["Day P&L"] >= 0 else "color: #ff5252"
+                        styles.loc[idx, "Day P&L"] = dc
+                        styles.loc[idx, "Day P&L %"] = dc
+                    return styles
+
+                styled_spf = df_spos.style.apply(_style_spos, axis=None).background_gradient(
+                    subset=["P&L %", "Day P&L %"], cmap="RdYlGn", vmin=-5, vmax=5
+                ).format({
+                    "Avg Price": "₽ {:.2f}", "Last Price": "₽ {:.2f}", "Value": "₽ {:,.0f}",
+                    "P&L": "₽ {:+,.0f}", "P&L %": "{:+.2f}%",
+                    "Day P&L": "₽ {:+,.0f}", "Day P&L %": "{:+.2f}%", "Qty": "{:.0f}",
+                })
+                st.dataframe(styled_spf, width="stretch", hide_index=True)
+            else:
+                st.info("No open positions in Sandbox.")
         else:
             st.markdown("**Status:** 🔴 Inactive")
 

@@ -32,21 +32,25 @@ TARGET_ACCOUNT_ID = "2274582154"
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=55, show_spinner=False)
-def fetch_portfolio(_token: str) -> dict:
+def fetch_portfolio(_token: str, sandbox_account_id: str = None) -> dict:
     """
     Fetch portfolio positions, cash, P&L, and recent operations.
-
-    Returns a dict:
-        total_value, total_pnl, day_pnl, cash, positions (list), operations (list)
+    If sandbox_account_id is provided, fetches from the Sandbox instead.
     """
     with Client(_token) as client:
         # Resolve account
-        account_id = _resolve_account(client)
-        if not account_id:
-            return _empty_portfolio("No accounts found")
+        if sandbox_account_id:
+            account_id = sandbox_account_id
+        else:
+            account_id = _resolve_account(client)
+            if not account_id:
+                return _empty_portfolio("No accounts found")
 
         # Fetch portfolio
-        port = client.operations.get_portfolio(account_id=account_id)
+        if sandbox_account_id:
+            port = client.sandbox.get_sandbox_portfolio(account_id=account_id)
+        else:
+            port = client.operations.get_portfolio(account_id=account_id)
 
         # Fetch last prices + prev-day closes for each position
         last_prices: Dict[str, float] = {}
@@ -106,8 +110,14 @@ def fetch_portfolio(_token: str) -> dict:
                 cash_balance += float(pos.quantity.units)
                 continue
 
-            qty = float(pos.quantity.units)
-            avg = float(pos.average_position_price.units) + float(pos.average_position_price.nano) / 1e9
+            qty = 0.0
+            if pos.quantity and getattr(pos.quantity, "units", None) is not None:
+                qty = float(pos.quantity.units)
+
+            avg = 0.0
+            if pos.average_position_price and getattr(pos.average_position_price, "units", None) is not None:
+                avg = float(pos.average_position_price.units) + float(pos.average_position_price.nano) / 1e9
+                
             last = last_prices.get(pos.instrument_uid, avg)
             prev = prev_prices.get(pos.instrument_uid, last)
 
@@ -136,26 +146,39 @@ def fetch_portfolio(_token: str) -> dict:
         # Recent operations (last 30 days)
         ops_out: List[dict] = []
         try:
-            ops = client.operations.get_operations(
-                account_id=account_id,
-                from_=datetime.now(timezone.utc) - timedelta(days=30),
-                to=datetime.now(timezone.utc),
-            )
+            if sandbox_account_id:
+                ops = client.sandbox.get_sandbox_operations(
+                    account_id=account_id,
+                    from_=datetime.now(timezone.utc) - timedelta(days=30),
+                    to=datetime.now(timezone.utc),
+                )
+            else:
+                ops = client.operations.get_operations(
+                    account_id=account_id,
+                    from_=datetime.now(timezone.utc) - timedelta(days=30),
+                    to=datetime.now(timezone.utc),
+                )
             for op in ops.operations[:20]:
                 op_amt = 0.0
-                if hasattr(op, "payment"):
+                if hasattr(op, "payment") and getattr(op.payment, "units", None) is not None:
                     op_amt = float(op.payment.units) + float(op.payment.nano) / 1e9
-                elif hasattr(op, "amount"):
+                elif hasattr(op, "amount") and getattr(op.amount, "units", None) is not None:
                     op_amt = float(op.amount.units) + float(op.amount.nano) / 1e9
+                
+                op_qty = 0.0
+                if hasattr(op, "quantity") and getattr(op.quantity, "units", None) is not None:
+                    op_qty = float(op.quantity.units)
+                
+                op_price = 0.0
+                if hasattr(op, "price") and getattr(op.price, "units", None) is not None:
+                    op_price = float(op.price.units) + float(op.price.nano) / 1e9
+
                 ops_out.append({
                     "date": op.date.strftime("%Y-%m-%d %H:%M") if op.date else "",
                     "ticker": ticker_names.get(op.instrument_uid, op.instrument_uid[:8]),
                     "type": op.operation_type.name.replace("_", " ").title(),
-                    "qty": float(op.quantity.units) if hasattr(op.quantity, "units") else 0,
-                    "price": (
-                        float(op.price.units) + float(op.price.nano) / 1e9
-                        if hasattr(op.price, "units") else 0
-                    ),
+                    "qty": op_qty,
+                    "price": op_price,
                     "amount": op_amt,
                 })
         except Exception:
@@ -264,6 +287,15 @@ def sandbox_init(_token: str) -> str:
     except Exception as e:
         logger.error(f"Sandbox init error (likely 35001 limit): {e}")
         return ""
+
+def close_sandbox_account(_token: str, account_id: str):
+    """Close an active sandbox account."""
+    try:
+        with Client(_token) as client:
+            client.sandbox.close_sandbox_account(account_id=account_id)
+            logger.info(f"Sandbox closed: {account_id}")
+    except Exception as e:
+        logger.error(f"Sandbox close error: {e}")
 
 
 def sandbox_deposit(_token: str, account_id: str, amount: int = 100_000):
