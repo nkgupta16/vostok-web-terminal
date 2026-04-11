@@ -539,8 +539,19 @@ with tab_squeeze:
                     "Alert": status,
                 })
 
-            df_sq = pd.DataFrame(rows_sq)
-            st.dataframe(df_sq, width="stretch", hide_index=True, height=min(600, 40 + 35 * len(df_sq)))
+            styled_sq = (
+                df_sq.style
+                .background_gradient(subset=["BB Width %ile"], cmap="YlOrRd", vmin=0, vmax=100)
+                .background_gradient(subset=["ATR Ratio"], cmap="YlGnBu", vmin=0, vmax=3)
+                .bar(subset=["Days in Squeeze"], color='#ff4081')
+                .format({
+                    "Price": "{:,.2f}",
+                    "BB Width %ile": "{:.1f}%",
+                    "ATR Ratio": "{:.2f}",
+                })
+            )
+
+            st.dataframe(styled_sq, width="stretch", hide_index=True, height=min(600, 40 + 35 * len(df_sq)))
 
             st_copy_to_clipboard(
                 text=df_to_tsv(df_sq),
@@ -584,12 +595,16 @@ with tab_port:
                         styles.loc[idx, "Day P&L %"] = dc
                     return styles
 
+                styled_pf = df_pos.style.apply(_style_pos, axis=None).background_gradient(
+                    subset=["P&L %", "Day P&L %"], cmap="RdYlGn", vmin=-5, vmax=5
+                ).format({
+                    "Avg Price": "₽ {:.2f}", "Last Price": "₽ {:.2f}", "Value": "₽ {:,.0f}",
+                    "P&L": "₽ {:+,.0f}", "P&L %": "{:+.2f}%",
+                    "Day P&L": "₽ {:+,.0f}", "Day P&L %": "{:+.2f}%", "Qty": "{:.0f}",
+                })
+
                 st.dataframe(
-                    df_pos.style.apply(_style_pos, axis=None).format({
-                        "Avg Price": "₽ {:.2f}", "Last Price": "₽ {:.2f}", "Value": "₽ {:,.0f}",
-                        "P&L": "₽ {:+,.0f}", "P&L %": "{:+.2f}%",
-                        "Day P&L": "₽ {:+,.0f}", "Day P&L %": "{:+.2f}%", "Qty": "{:.0f}",
-                    }),
+                    styled_pf,
                     width="stretch", hide_index=True,
                 )
                 st_copy_to_clipboard(text=df_to_tsv(df_pos), before_copy_label="📋 Copy Positions", after_copy_label="✅ Copied!")
@@ -690,7 +705,9 @@ with tab_divs:
                 return styles
 
             st.dataframe(
-                df_div.style.apply(_style_divs, axis=None).format(
+                df_div.style.apply(_style_divs, axis=None)
+                .background_gradient(subset=["Yield est. %"], cmap="Greens", vmin=0, vmax=15)
+                .format(
                     {
                         "Div/Share (₽)": "₽ {:.2f}", 
                         "Expected Payout (₽)": "₽ {:,.2f}", 

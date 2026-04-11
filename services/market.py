@@ -273,10 +273,13 @@ async def fetch_candles_async(client: AsyncClient, uid: str, days: int = CANDLES
 
 async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict:
     results = {}
+    sem = asyncio.Semaphore(12)  # Throttle MTF concurrent blasts
+    
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
-        try:
-            mtf_candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
-            candles_1d = mtf_candles.get("1D", [])
+        async with sem:
+            try:
+                mtf_candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
+                candles_1d = mtf_candles.get("1D", [])
             candles_4h = mtf_candles.get("4H", [])
             candles_1h = mtf_candles.get("1H", [])
 
@@ -371,10 +374,13 @@ def scan_market(_token: str, _tickers_tuple: tuple) -> Dict[str, dict]:
 
 async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
     results = {}
+    sem = asyncio.Semaphore(15) # Throttle squeeze 15 concurrent
+
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
-        try:
-            to_time = now()
-            from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
+        async with sem:
+            try:
+                to_time = now()
+                from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
             candles = []
             async for c in client.get_all_candles(
                 instrument_id=uid,

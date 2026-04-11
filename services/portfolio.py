@@ -90,6 +90,7 @@ def fetch_portfolio(_token: str) -> dict:
                         )
                 except Exception:
                     pass
+                time.sleep(0.05)  # Throttle to prevent RESOURCE_EXHAUSTED
             except Exception:
                 continue
 
