@@ -348,8 +348,8 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                     "chandelier_exit": float(latest.get("CHANDELIER_EXIT", 0)),
                     "df": df,
                 }
-        except Exception as e:
-            logger.error(f"Market scan error for {ticker}: {e}")
+            except Exception as e:
+                logger.error(f"Market scan error for {ticker}: {e}")
 
     async with AsyncClient(token) as client:
         tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
