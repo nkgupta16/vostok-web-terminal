@@ -17,8 +17,6 @@ import streamlit as st
 from loguru import logger
 
 from t_tech.invest import Client, AsyncClient, CandleInterval, InstrumentStatus
-from t_tech.invest.retrying.aio.client import AsyncRetryingClient
-from t_tech.invest.retrying.settings import RetryClientSettings
 from t_tech.invest.utils import now
 
 from services.indicators import (
@@ -142,11 +140,17 @@ def get_sector(ticker: str) -> str:
 
 CANDLES_COUNT = 50  # Daily candles to fetch for dashboard
 SQUEEZE_CANDLES = 150  # More data needed for reliable squeeze percentiles
+MAX_CONCURRENT_CANDLE_REQUESTS = 2
+MAX_RETRIES = 4
+RETRYABLE_ERROR_MARKERS = ("RESOURCE_EXHAUSTED", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED")
 
 # ---------------------------------------------------------------------------
 # Ticker Persistence (JSON file for user customizations)
 # ---------------------------------------------------------------------------
 _TICKER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ticker_config.json")
+_SELECTED_TICKERS_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "selected_tickers_config.json"
+)
 
 
 def save_tickers(tickers: Dict[str, str]):
@@ -179,8 +183,33 @@ def get_selected_tickers() -> list:
     """Return the list of currently selected (enabled) ticker symbols."""
     all_tickers = get_tickers()
     if "selected_tickers" not in st.session_state:
-        st.session_state["selected_tickers"] = list(all_tickers.keys())
+        st.session_state["selected_tickers"] = load_selected_tickers(list(all_tickers.keys()))
     return st.session_state["selected_tickers"]
+
+
+def save_selected_tickers(selected_tickers: List[str]):
+    """Persist selected tickers so enabled universe survives app restarts."""
+    unique_selected = list(dict.fromkeys(selected_tickers))
+    with open(_SELECTED_TICKERS_CONFIG_PATH, "w") as f:
+        json.dump(unique_selected, f, indent=2)
+
+
+def load_selected_tickers(valid_tickers: List[str]) -> List[str]:
+    """Load selected tickers from disk and sanitize against current ticker map."""
+    valid_set = set(valid_tickers)
+    if os.path.exists(_SELECTED_TICKERS_CONFIG_PATH):
+        try:
+            with open(_SELECTED_TICKERS_CONFIG_PATH) as f:
+                raw = json.load(f)
+            if isinstance(raw, list):
+                if not raw:
+                    return []
+                filtered = [ticker for ticker in raw if ticker in valid_set]
+                if filtered:
+                    return filtered
+        except Exception:
+            pass
+    return list(valid_tickers)
 
 
 def fetch_all_moex_shares(token: str) -> Dict[str, dict]:
@@ -189,18 +218,67 @@ def fetch_all_moex_shares(token: str) -> Dict[str, dict]:
     try:
         with Client(token) as client:
             resp = client.instruments.shares(
-                instrument_status=InstrumentStatus.INSTRUMENT_STATUS_BASE
+                instrument_status=InstrumentStatus.INSTRUMENT_STATUS_ALL
             )
             for share in resp.instruments:
-                if share.exchange == "MOEX" or share.exchange == "MOEX_EVENING_WEEKEND":
-                    results[share.ticker] = {
-                        "uid": share.uid,
-                        "name": share.name,
-                        "lot": getattr(share, "lot", 1) or 1,
-                        "figi": share.figi,
-                    }
-    except Exception:
-        pass
+                exchange = (getattr(share, "exchange", "") or "").lower()
+                if "moex" not in exchange:
+                    continue
+                if not bool(getattr(share, "api_trade_available_flag", False)):
+                    continue
+                if not getattr(share, "uid", None) or not getattr(share, "ticker", None):
+                    continue
+                if bool(getattr(share, "for_qual_investor_flag", False)):
+                    continue
+                if bool(getattr(share, "otc_flag", False)):
+                    continue
+
+                ticker = str(share.ticker).strip().upper()
+                if not ticker:
+                    continue
+
+                existing = results.get(ticker)
+                if existing and existing.get("api_trade_available", False):
+                    continue
+
+                api_trade_available = bool(getattr(share, "api_trade_available_flag", False))
+                if existing and not existing.get("api_trade_available", False) and not api_trade_available:
+                    continue
+
+                class_code = (getattr(share, "class_code", "") or "").upper()
+                exchange_label = (getattr(share, "exchange", "") or "").lower()
+
+                rank = 0
+                if "e_wknd" in exchange_label or "evng" in exchange_label:
+                    rank -= 1
+                if class_code in {"TQBR", "TQTF", "TQTD"}:
+                    rank += 2
+                if api_trade_available:
+                    rank += 3
+                if existing and rank <= existing.get("_rank", -999):
+                    continue
+
+                lot = int(getattr(share, "lot", 1) or 1)
+                lot = max(lot, 1)
+                name = (getattr(share, "name", "") or "").strip()
+                figi = (getattr(share, "figi", "") or "").strip()
+
+                results[ticker] = {
+                    "uid": share.uid,
+                    "name": name or ticker,
+                    "lot": lot,
+                    "figi": figi,
+                    "class_code": class_code,
+                    "exchange": exchange_label,
+                    "api_trade_available": api_trade_available,
+                    "_rank": rank,
+                }
+    except Exception as exc:
+        logger.warning(f"Failed to fetch MOEX share universe: {exc}")
+        return {}
+
+    for ticker in list(results.keys()):
+        results[ticker].pop("_rank", None)
     return results
 
 
@@ -234,6 +312,24 @@ def run_coro_sync(coro_func, *args):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_run)
         return future.result()
+
+
+def _is_retryable_api_error(exc: Exception) -> bool:
+    err = str(exc).upper()
+    return any(marker in err for marker in RETRYABLE_ERROR_MARKERS)
+
+
+def _retry_wait_seconds(exc: Exception, attempt: int, base: int = 2, cap: int = 20) -> int:
+    wait = min(cap, base * (2 ** attempt))
+    try:
+        from t_tech.invest.logging import get_metadata_from_aio_error
+
+        metadata = get_metadata_from_aio_error(exc)
+        if metadata and metadata.ratelimit_reset:
+            wait = max(wait, int(metadata.ratelimit_reset) + 1)
+    except Exception:
+        pass
+    return wait
 
 async def fetch_candles_async(client: AsyncClient, uid: str, days: int = CANDLES_COUNT) -> dict:
     """Fetch 1H, 4H, and 1D candles for an instrument UID asynchronously."""
@@ -269,28 +365,52 @@ async def fetch_candles_async(client: AsyncClient, uid: str, days: int = CANDLES
         "1H": results[2]
     }
 
+
+async def _fetch_interval_candles(
+    client: AsyncClient,
+    uid: str,
+    interval: CandleInterval,
+    days_back: int,
+    max_candles: int,
+) -> list:
+    from_time = now() - timedelta(days=days_back)
+    to_time = now()
+    candles = []
+    async for c in client.get_all_candles(
+        instrument_id=uid,
+        from_=from_time,
+        to=to_time,
+        interval=interval,
+    ):
+        candles.append(c)
+    if len(candles) > max_candles:
+        candles = candles[-max_candles:]
+    return candles
+
 # ---------------------------------------------------------------------------
 # Full Market Scan
 # ---------------------------------------------------------------------------
 
 async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict:
     results = {}
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CANDLE_REQUESTS)
 
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
-        max_retries = 3
-        for attempt in range(max_retries):
+        for attempt in range(MAX_RETRIES):
             try:
-                mtf_candles = await fetch_candles_async(client, uid, CANDLES_COUNT)
-                candles_1d = mtf_candles.get("1D", [])
-                candles_4h = mtf_candles.get("4H", [])
-                candles_1h = mtf_candles.get("1H", [])
+                async with semaphore:
+                    candles_1d = await _fetch_interval_candles(
+                        client,
+                        uid,
+                        CandleInterval.CANDLE_INTERVAL_DAY,
+                        CANDLES_COUNT + 10,
+                        CANDLES_COUNT,
+                    )
 
                 if not candles_1d or len(candles_1d) < 2:
                     return
 
                 df = calculate_indicators(prepare_candle_data(candles_1d))
-                df_4h = calculate_indicators(prepare_candle_data(candles_4h)) if len(candles_4h) > 1 else None
-                df_1h = calculate_indicators(prepare_candle_data(candles_1h)) if len(candles_1h) > 1 else None
 
                 latest = df.iloc[-1]
                 previous = df.iloc[-2]
@@ -318,7 +438,31 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                     else 0.0
                 )
 
-                is_buy, _, is_aplus = check_buy_signal(df, df_4h=df_4h, df_1h=df_1h, bb_buffer=BB_BUFFER)
+                is_buy, _, _ = check_buy_signal(df, bb_buffer=BB_BUFFER)
+                is_aplus = False
+                if is_buy:
+                    async with semaphore:
+                        candles_4h, candles_1h = await asyncio.gather(
+                            _fetch_interval_candles(
+                                client, uid, CandleInterval.CANDLE_INTERVAL_4_HOUR, 30, 60
+                            ),
+                            _fetch_interval_candles(
+                                client, uid, CandleInterval.CANDLE_INTERVAL_HOUR, 10, 60
+                            ),
+                        )
+                    df_4h = (
+                        calculate_indicators(prepare_candle_data(candles_4h))
+                        if len(candles_4h) > 1
+                        else None
+                    )
+                    df_1h = (
+                        calculate_indicators(prepare_candle_data(candles_1h))
+                        if len(candles_1h) > 1
+                        else None
+                    )
+                    is_buy, _, is_aplus = check_buy_signal(
+                        df, df_4h=df_4h, df_1h=df_1h, bb_buffer=BB_BUFFER
+                    )
 
                 confidence = calculate_confidence_score(
                     rsi=rsi,
@@ -352,34 +496,22 @@ async def _scan_market_batch(token: str, tickers: dict, lot_sizes: dict) -> dict
                 }
                 return  # Success
             except Exception as e:
-                err_str = str(e)
-                if "RESOURCE_EXHAUSTED" in err_str:
-                    wait = 5
-                    try:
-                        from t_tech.invest.logging import get_metadata_from_aio_error
-                        metadata = get_metadata_from_aio_error(e)
-                        if metadata and metadata.ratelimit_reset:
-                            wait = int(metadata.ratelimit_reset) + 1
-                    except Exception:
-                        pass
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Rate limited on {ticker}, waiting {wait}s (attempt {attempt+1}/{max_retries})")
+                if _is_retryable_api_error(e):
+                    if attempt < MAX_RETRIES - 1:
+                        wait = _retry_wait_seconds(e, attempt)
+                        logger.warning(
+                            f"Retryable market error on {ticker}, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})"
+                        )
                         await asyncio.sleep(wait)
                     else:
-                        logger.error(f"Market scan error for {ticker}: exhausted {max_retries} retries")
+                        logger.error(f"Market scan error for {ticker}: exhausted {MAX_RETRIES} retries")
                 else:
                     logger.error(f"Market scan error for {ticker}: {e}")
                     return
 
     async with AsyncClient(token) as client:
-        items = list(tickers.items())
-        batch_size = 5
-        for i in range(0, len(items), batch_size):
-            batch = items[i:i + batch_size]
-            tasks = [process_ticker(client, t, u) for t, u in batch]
-            await asyncio.gather(*tasks)
-            if i + batch_size < len(items):
-                await asyncio.sleep(1.5)
+        tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
+        await asyncio.gather(*tasks)
     return results
 
 @st.cache_data(ttl=55, show_spinner=False)
@@ -400,21 +532,22 @@ def scan_market(_token: str, _tickers_tuple: tuple) -> Dict[str, dict]:
 
 async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
     results = {}
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CANDLE_REQUESTS)
 
     async def process_ticker(client: AsyncClient, ticker: str, uid: str):
-        max_retries = 3
-        for attempt in range(max_retries):
+        for attempt in range(MAX_RETRIES):
             try:
                 to_time = now()
                 from_time = to_time - timedelta(days=SQUEEZE_CANDLES + 30)
                 candles = []
-                async for c in client.get_all_candles(
-                    instrument_id=uid,
-                    from_=from_time,
-                    to=to_time,
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY,
-                ):
-                    candles.append(c)
+                async with semaphore:
+                    async for c in client.get_all_candles(
+                        instrument_id=uid,
+                        from_=from_time,
+                        to=to_time,
+                        interval=CandleInterval.CANDLE_INTERVAL_DAY,
+                    ):
+                        candles.append(c)
 
                 if len(candles) < 30:
                     return
@@ -429,35 +562,22 @@ async def _scan_squeeze_batch(token: str, tickers: dict) -> dict:
                 }
                 return  # Success
             except Exception as e:
-                err_str = str(e)
-                if "RESOURCE_EXHAUSTED" in err_str:
-                    # Parse ratelimit_reset from metadata (T-Bank SDK pattern)
-                    wait = 5
-                    try:
-                        from t_tech.invest.logging import get_metadata_from_aio_error
-                        metadata = get_metadata_from_aio_error(e)
-                        if metadata and metadata.ratelimit_reset:
-                            wait = int(metadata.ratelimit_reset) + 1
-                    except Exception:
-                        pass
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Rate limited on {ticker}, waiting {wait}s (attempt {attempt+1}/{max_retries})")
+                if _is_retryable_api_error(e):
+                    if attempt < MAX_RETRIES - 1:
+                        wait = _retry_wait_seconds(e, attempt)
+                        logger.warning(
+                            f"Retryable squeeze error on {ticker}, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})"
+                        )
                         await asyncio.sleep(wait)
                     else:
-                        logger.error(f"Squeeze scan error for {ticker}: exhausted {max_retries} retries")
+                        logger.error(f"Squeeze scan error for {ticker}: exhausted {MAX_RETRIES} retries")
                 else:
                     logger.error(f"Squeeze scan error for {ticker}: {e}")
                     return  # Non-retryable error
 
     async with AsyncClient(token) as client:
-        items = list(tickers.items())
-        batch_size = 5
-        for i in range(0, len(items), batch_size):
-            batch = items[i:i + batch_size]
-            tasks = [process_ticker(client, t, u) for t, u in batch]
-            await asyncio.gather(*tasks)
-            if i + batch_size < len(items):
-                await asyncio.sleep(1.5)
+        tasks = [process_ticker(client, t, u) for t, u in tickers.items()]
+        await asyncio.gather(*tasks)
     return results
 
 @st.cache_data(ttl=55, show_spinner=False)

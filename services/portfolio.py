@@ -25,6 +25,73 @@ from t_tech.invest.utils import now
 # Target Account
 # ---------------------------------------------------------------------------
 TARGET_ACCOUNT_ID = "2274582154"
+RETRYABLE_ERROR_MARKERS = ("RESOURCE_EXHAUSTED", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED")
+
+
+def _is_retryable_api_error(exc: Exception) -> bool:
+    err = str(exc).upper()
+    return any(marker in err for marker in RETRYABLE_ERROR_MARKERS)
+
+
+def _retry_wait_seconds(exc: Exception, attempt: int, base: int = 2, cap: int = 15) -> int:
+    wait = min(cap, base * (2 ** attempt))
+    try:
+        from t_tech.invest.logging import get_metadata_from_grpc_error
+
+        metadata = get_metadata_from_grpc_error(exc)
+        if metadata and metadata.ratelimit_reset:
+            wait = max(wait, int(metadata.ratelimit_reset) + 1)
+    except Exception:
+        pass
+    return wait
+
+
+def _get_instrument_identity(client: Client, instrument_uid: str) -> Tuple[str, str]:
+    inst = client.instruments.get_instrument_by(
+        id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_UID,
+        id=instrument_uid,
+    )
+    if not inst or not inst.instrument:
+        return "", ""
+    return inst.instrument.figi, inst.instrument.ticker
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_prev_day_close(_token: str, figi: str) -> Optional[float]:
+    with Client(_token) as cache_client:
+        candles = list(
+            cache_client.get_all_candles(
+                instrument_id=figi,
+                from_=datetime.now(timezone.utc) - timedelta(days=7),
+                to=datetime.now(timezone.utc),
+                interval=CandleInterval.CANDLE_INTERVAL_DAY,
+            )
+        )
+    if len(candles) < 2:
+        return None
+    return float(candles[-2].close.units) + float(candles[-2].close.nano) / 1e9
+
+
+def _get_operations_with_retry(client: Client, account_id: str, sandbox_account_id: str = None):
+    max_retries = 4
+    for attempt in range(max_retries):
+        try:
+            if sandbox_account_id:
+                return client.sandbox.get_sandbox_operations(
+                    account_id=account_id,
+                    from_=datetime.now(timezone.utc) - timedelta(days=30),
+                    to=datetime.now(timezone.utc),
+                )
+            return client.operations.get_operations(
+                account_id=account_id,
+                from_=datetime.now(timezone.utc) - timedelta(days=30),
+                to=datetime.now(timezone.utc),
+            )
+        except Exception as exc:
+            if _is_retryable_api_error(exc) and attempt < max_retries - 1:
+                time.sleep(_retry_wait_seconds(exc, attempt))
+                continue
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -59,14 +126,9 @@ def fetch_portfolio(_token: str, sandbox_account_id: str = None) -> dict:
 
         for pos in port.positions:
             try:
-                inst = client.instruments.get_instrument_by(
-                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_UID,
-                    id=pos.instrument_uid,
-                )
-                if not inst or not inst.instrument:
+                figi, ticker = _get_instrument_identity(client, pos.instrument_uid)
+                if not figi:
                     continue
-                figi = inst.instrument.figi
-                ticker = inst.instrument.ticker
                 ticker_names[pos.instrument_uid] = ticker
 
                 # Current price
@@ -80,21 +142,12 @@ def fetch_portfolio(_token: str, sandbox_account_id: str = None) -> dict:
 
                 # Prev-day close
                 try:
-                    cdls = list(
-                        client.get_all_candles(
-                            instrument_id=figi,
-                            from_=datetime.now(timezone.utc) - timedelta(days=7),
-                            to=datetime.now(timezone.utc),
-                            interval=CandleInterval.CANDLE_INTERVAL_DAY,
-                        )
-                    )
-                    if len(cdls) >= 2:
-                        prev_prices[pos.instrument_uid] = (
-                            float(cdls[-2].close.units) + float(cdls[-2].close.nano) / 1e9
-                        )
+                    prev_close = _get_prev_day_close(_token, figi)
+                    if prev_close is not None:
+                        prev_prices[pos.instrument_uid] = prev_close
                 except Exception:
                     pass
-                time.sleep(0.05)  # Throttle to prevent RESOURCE_EXHAUSTED
+                time.sleep(0.02)
             except Exception:
                 continue
 
@@ -146,18 +199,7 @@ def fetch_portfolio(_token: str, sandbox_account_id: str = None) -> dict:
         # Recent operations (last 30 days)
         ops_out: List[dict] = []
         try:
-            if sandbox_account_id:
-                ops = client.sandbox.get_sandbox_operations(
-                    account_id=account_id,
-                    from_=datetime.now(timezone.utc) - timedelta(days=30),
-                    to=datetime.now(timezone.utc),
-                )
-            else:
-                ops = client.operations.get_operations(
-                    account_id=account_id,
-                    from_=datetime.now(timezone.utc) - timedelta(days=30),
-                    to=datetime.now(timezone.utc),
-                )
+            ops = _get_operations_with_retry(client, account_id, sandbox_account_id)
             for op in ops.operations[:20]:
                 op_amt = 0.0
                 if hasattr(op, "payment") and getattr(op.payment, "units", None) is not None:
@@ -252,9 +294,8 @@ def fetch_dividends(
                         "days_left": days_left,
                     })
             except Exception as exc:
-                err = str(exc)
-                if "RESOURCE_EXHAUSTED" in err:
-                    time.sleep(3)
+                if _is_retryable_api_error(exc):
+                    time.sleep(_retry_wait_seconds(exc, 0, base=3, cap=12))
                 continue
 
     events.sort(key=lambda e: e["date"])

@@ -8,7 +8,7 @@
 import io
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -16,6 +16,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from loguru import logger
 from st_copy_to_clipboard import st_copy_to_clipboard
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
 
 # ── Page Config ──────────────────────────────────────────────────────
 st.set_page_config(
@@ -32,6 +37,7 @@ from services.market import (
     get_tickers,
     get_selected_tickers,
     save_tickers,
+    save_selected_tickers,
     scan_market,
     scan_squeeze,
     fetch_all_moex_shares,
@@ -97,6 +103,30 @@ def df_to_tsv(df: pd.DataFrame) -> str:
     buf = io.StringIO()
     df.to_csv(buf, sep="\t", index=False)
     return buf.getvalue()
+
+
+def build_all_tables_snapshot_text() -> str:
+    """Build a single clipboard-friendly snapshot for dashboard, squeeze, positions, and dividends."""
+    ts_utc_plus_3 = datetime.now(timezone.utc) + timedelta(hours=3)
+    header = (
+        "VOSTOK WEB TERMINAL — TABLE SNAPSHOT\n"
+        f"Timestamp: {ts_utc_plus_3.strftime('%Y-%m-%d %H:%M:%S')} (UTC+3 / GMT+3)"
+    )
+    sections = [
+        ("Dashboard", "snapshot_dash_df"),
+        ("Squeeze", "snapshot_squeeze_df"),
+        ("Current Positions", "snapshot_positions_df"),
+        ("Dividends", "snapshot_dividends_df"),
+    ]
+    parts = [header]
+    for title, key in sections:
+        parts.append(f"\n=== {title} ===")
+        df = st.session_state.get(key)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            parts.append(df_to_tsv(df))
+        else:
+            parts.append("(no data)")
+    return "\n".join(parts)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -185,6 +215,7 @@ st.sidebar.markdown(
 )
 
 render_sidebar_auth()
+token = get_invest_token()
 
 # ── Auto-Scan (10s – 300s + custom) ──
 st.sidebar.markdown("---")
@@ -213,85 +244,153 @@ else:
         disabled=not auto_scan,
     )
 
+auto_scan_full_tabs = st.sidebar.toggle(
+    "Refresh all tabs in auto mode",
+    value=False,
+    key="auto_scan_full_tabs",
+    disabled=not auto_scan,
+    help="When disabled, only Dashboard keeps auto-refreshing to reduce API load and rate limits.",
+)
+
+with st.sidebar.expander("⚙️ Tab Sync in Auto-Scan"):
+    auto_sync_dashboard = st.toggle("Dashboard", value=True, key="auto_sync_dashboard", disabled=not auto_scan)
+    auto_sync_squeeze = st.toggle("Squeeze", value=True, key="auto_sync_squeeze", disabled=not auto_scan)
+    auto_sync_portfolio = st.toggle("Portfolio", value=True, key="auto_sync_portfolio", disabled=not auto_scan)
+    auto_sync_dividends = st.toggle("Dividends", value=False, key="auto_sync_dividends", disabled=not auto_scan)
+
+sync_dashboard = (not auto_scan) or auto_sync_dashboard
+sync_squeeze = (not auto_scan) or auto_sync_squeeze
+sync_portfolio = (not auto_scan) or auto_sync_portfolio
+sync_dividends = (not auto_scan) or auto_sync_dividends
+
+if auto_scan and auto_scan_full_tabs:
+    sync_squeeze = True
+    sync_portfolio = True
+    sync_dividends = True
+
 # ── Ticker Manager ──
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📋 Ticker Universe")
 
 all_tickers = get_tickers()
 current_selected = get_selected_tickers()
+valid_selected = sorted([ticker for ticker in current_selected if ticker in all_tickers])
+if "ticker_multiselect" not in st.session_state:
+    st.session_state["ticker_multiselect"] = valid_selected
+else:
+    widget_selected = sorted(
+        [ticker for ticker in st.session_state.get("ticker_multiselect", []) if ticker in all_tickers]
+    )
+    if widget_selected != valid_selected:
+        st.session_state["ticker_multiselect"] = valid_selected
 
 # Quick select/deselect
 tc1, tc2 = st.sidebar.columns(2)
 if tc1.button("✅ All", key="sel_all", width="stretch"):
-    st.session_state["selected_tickers"] = list(all_tickers.keys())
+    all_selected = sorted(all_tickers.keys())
+    st.session_state["ticker_multiselect"] = all_selected
+    st.session_state["selected_tickers"] = all_selected
+    save_selected_tickers(all_selected)
     st.rerun()
 if tc2.button("❌ None", key="sel_none", width="stretch"):
+    st.session_state["ticker_multiselect"] = []
     st.session_state["selected_tickers"] = []
+    save_selected_tickers([])
     st.rerun()
 
 # Multiselect for active tickers
 selected = st.sidebar.multiselect(
     "Active Tickers",
     options=sorted(all_tickers.keys()),
-    default=sorted([t for t in current_selected if t in all_tickers]),
     key="ticker_multiselect",
     label_visibility="collapsed",
 )
-st.session_state["selected_tickers"] = selected
+selected_sorted = sorted(selected)
+if selected_sorted != sorted(st.session_state.get("selected_tickers", [])):
+    st.session_state["selected_tickers"] = selected_sorted
+    save_selected_tickers(selected_sorted)
+else:
+    st.session_state["selected_tickers"] = selected_sorted
 
-st.sidebar.caption(f"{len(selected)}/{len(all_tickers)} tickers active")
+st.sidebar.caption(f"{len(selected_sorted)}/{len(all_tickers)} tickers active")
 
 # Add / Remove tickers
 with st.sidebar.expander("➕ Add / Remove Tickers"):
-    new_ticker = st.text_input("Ticker Symbol", key="new_ticker_input", placeholder="e.g. MGNT")
-    st.caption("UID is auto-detected from T-Bank API")
-
-    ac1, ac2 = st.columns(2)
-    if ac1.button("➕ Add", key="add_ticker", width="stretch"):
-        t = new_ticker.strip().upper()
-        if not t:
-            st.warning("Enter a ticker symbol.")
-        elif t in all_tickers:
-            st.info(f"{t} already exists.")
-        elif not token:
-            st.warning("Connect API token first to auto-find UID.")
-        else:
-            # Auto-find UID via T-Bank API
-            with st.spinner(f"🔍 Looking up {t}…"):
-                found_uid = None
+    if token:
+        moex_reload = st.button("🔄 Reload MOEX List", key="reload_moex_list", width="stretch")
+        token_changed = st.session_state.get("moex_all_shares_token") != token
+        should_load_moex = (
+            moex_reload
+            or token_changed
+            or "moex_all_shares" not in st.session_state
+            or len(st.session_state.get("moex_all_shares", {})) <= 1
+        )
+        if should_load_moex:
+            with st.spinner("📡 Loading MOEX instrument list..."):
                 try:
-                    from t_tech.invest import Client, InstrumentStatus
-                    with Client(token) as cl:
-                        resp = cl.instruments.shares(
-                            instrument_status=InstrumentStatus.INSTRUMENT_STATUS_BASE
-                        )
-                        for share in resp.instruments:
-                            if share.ticker == t:
-                                found_uid = share.uid
-                                break
+                    all_shares = fetch_all_moex_shares(token)
+                    st.session_state["moex_all_shares"] = {
+                        ticker: info.get("uid")
+                        for ticker, info in all_shares.items()
+                        if ticker and info.get("uid")
+                    }
+                    st.session_state["moex_all_shares_token"] = token
+                    log(f"Loaded {len(st.session_state['moex_all_shares'])} MOEX instruments")
                 except Exception as e:
-                    st.error(f"API error: {e}")
+                    st.error(f"Failed to load instrument list: {e}")
+                    st.session_state["moex_all_shares"] = {}
+                    st.session_state["moex_all_shares_token"] = token
 
-            if found_uid:
-                all_tickers[t] = found_uid
-                st.session_state["tickers"] = all_tickers
-                if t not in st.session_state["selected_tickers"]:
-                    st.session_state["selected_tickers"].append(t)
-                save_tickers(all_tickers)
-                log(f"Added ticker {t} (UID: {found_uid})")
-                st.success(f"✅ Added {t} — UID auto-detected")
-                st.rerun()
+        moex_universe = st.session_state.get("moex_all_shares", {})
+        if len(moex_universe) <= 1:
+            st.warning(
+                "MOEX universe seems incomplete. Click 'Reload MOEX List'. "
+                "If this persists, check token access rights."
+            )
+        available_to_add = sorted([t for t in moex_universe if t not in all_tickers])
+        new_ticker = st.selectbox(
+            "Search & Select Ticker",
+            options=[""] + available_to_add,
+            key="new_ticker_select",
+            help="All MOEX base shares — already-added tickers are hidden",
+        )
+
+        if new_ticker:
+            uid_preview = moex_universe.get(new_ticker, "—")
+            st.caption(f"UID: `{uid_preview}`")
+
+        if st.button("➕ Add", key="add_ticker", width="stretch"):
+            if not new_ticker:
+                st.warning("Select a ticker first.")
             else:
-                st.error(f"❌ Ticker '{t}' not found on MOEX via T-Bank API.")
+                found_uid = moex_universe.get(new_ticker)
+                if found_uid:
+                    all_tickers[new_ticker] = found_uid
+                    st.session_state["tickers"] = all_tickers
+                    if new_ticker not in st.session_state["selected_tickers"]:
+                        st.session_state["selected_tickers"].append(new_ticker)
+                    st.session_state["selected_tickers"] = sorted(st.session_state["selected_tickers"])
+                    save_tickers(all_tickers)
+                    save_selected_tickers(st.session_state["selected_tickers"])
+                    log(f"Added ticker {new_ticker} (UID: {found_uid})")
+                    st.success(f"✅ Added {new_ticker}")
+                    st.rerun()
+                else:
+                    st.error(f"UID not found for {new_ticker}")
+    else:
+        st.warning("Connect API token first to browse tickers.")
 
+    st.markdown("---")
     remove_ticker = st.selectbox("Remove Ticker", options=[""] + sorted(all_tickers.keys()), key="rm_ticker")
-    if ac2.button("🗑️ Remove", key="rm_btn", width="stretch"):
+    if st.button("🗑️ Remove", key="rm_btn", width="stretch"):
         if remove_ticker and remove_ticker in all_tickers:
             del all_tickers[remove_ticker]
             st.session_state["tickers"] = all_tickers
             if remove_ticker in st.session_state["selected_tickers"]:
                 st.session_state["selected_tickers"].remove(remove_ticker)
+            st.session_state["selected_tickers"] = sorted(st.session_state["selected_tickers"])
             save_tickers(all_tickers)
+            save_selected_tickers(st.session_state["selected_tickers"])
             log(f"Removed ticker {remove_ticker}")
             st.success(f"Removed {remove_ticker}")
             st.rerun()
@@ -299,8 +398,9 @@ with st.sidebar.expander("➕ Add / Remove Tickers"):
     if st.button("🔄 Reset to Defaults", key="reset_tickers"):
         from services.market import DEFAULT_TICKERS
         st.session_state["tickers"] = dict(DEFAULT_TICKERS)
-        st.session_state["selected_tickers"] = list(DEFAULT_TICKERS.keys())
+        st.session_state["selected_tickers"] = sorted(DEFAULT_TICKERS.keys())
         save_tickers(dict(DEFAULT_TICKERS))
+        save_selected_tickers(st.session_state["selected_tickers"])
         log("Reset tickers to defaults")
         st.rerun()
 
@@ -309,7 +409,7 @@ with st.sidebar.expander("➕ Add / Remove Tickers"):
 # HEADER (compact)
 # ═════════════════════════════════════════════════════════════════════
 st.markdown('<div class="header-glow"></div>', unsafe_allow_html=True)
-hcol1, hcol2 = st.columns([5, 1])
+hcol1, hcol2, hcol3 = st.columns([4, 1, 2])
 with hcol1:
     st.markdown(
         "<h1 style='margin:0; font-size:1.4rem; letter-spacing:0.04em;'>"
@@ -324,9 +424,21 @@ with hcol2:
         f"🕐 {datetime.now().strftime('%H:%M:%S')}</p>",
         unsafe_allow_html=True,
     )
+with hcol3:
+    snapshot_copy_slot = st.empty()
 
 # ── Scanning status bar ──
 _status_placeholder = st.empty()
+
+# Snapshot buffers for one-click copy.
+if "snapshot_dash_df" not in st.session_state:
+    st.session_state["snapshot_dash_df"] = pd.DataFrame()
+if "snapshot_squeeze_df" not in st.session_state:
+    st.session_state["snapshot_squeeze_df"] = pd.DataFrame()
+if "snapshot_positions_df" not in st.session_state:
+    st.session_state["snapshot_positions_df"] = pd.DataFrame()
+if "snapshot_dividends_df" not in st.session_state:
+    st.session_state["snapshot_dividends_df"] = pd.DataFrame()
 
 # ═════════════════════════════════════════════════════════════════════
 # TABS
@@ -336,7 +448,6 @@ tab_dash, tab_squeeze, tab_port, tab_divs, tab_sandbox, tab_strat, tab_logs = st
     "🎮 Sandbox", "🧠 Strategy", "📜 Logs",
 ])
 
-token = get_invest_token()
 tickers = get_tickers()
 selected_tickers = {t: tickers[t] for t in selected if t in tickers}
 tickers_tuple = tuple(sorted(selected_tickers.items()))
@@ -350,32 +461,35 @@ log(f"Session start — {len(selected_tickers)} tickers selected, token={'set' i
 with tab_dash:
     if not token:
         st.warning("⚠️ Connect your T-Bank API token in the sidebar to begin scanning.")
-        st.stop()
-
-    if not selected_tickers:
-        st.warning("⚠️ Select at least one ticker in the sidebar.")
-        st.stop()
-
-    _status_placeholder.markdown(
-        '<div class="scan-status"><span class="scan-dot"></span>'
-        f'Scanning {len(selected_tickers)} tickers… Dashboard</div>',
-        unsafe_allow_html=True,
-    )
-    with st.spinner(f"🔍 Scanning {len(selected_tickers)} tickers…"):
-        data = scan_market(token, tickers_tuple)
-        st.session_state["market_data"] = data
-    _status_placeholder.markdown(
-        '<div class="scan-status" style="border-color:rgba(0,230,118,0.3); color:#00e676;">'
-        f'✅ Dashboard scan complete — {len(data)} tickers at {datetime.now().strftime("%H:%M:%S")}</div>',
-        unsafe_allow_html=True,
-    )
+        data = {}
+    elif sync_dashboard:
+        if not selected_tickers:
+            st.warning("⚠️ Select at least one ticker in the sidebar.")
+            data = {}
+        else:
+            _status_placeholder.markdown(
+                '<div class="scan-status"><span class="scan-dot"></span>'
+                f'Scanning {len(selected_tickers)} tickers… Dashboard</div>',
+                unsafe_allow_html=True,
+            )
+            with st.spinner(f"🔍 Scanning {len(selected_tickers)} tickers…"):
+                data = scan_market(token, tickers_tuple)
+                st.session_state["market_data"] = data
+            _status_placeholder.markdown(
+                '<div class="scan-status" style="border-color:rgba(0,230,118,0.3); color:#00e676;">'
+                f'✅ Dashboard scan complete — {len(data)} tickers at {datetime.now().strftime("%H:%M:%S")}</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("⏸️ Dashboard auto-scan sync is OFF for this tab.")
+        data = st.session_state.get("market_data", {})
 
     if not data:
         st.error("No data returned. Check your token or network connection.")
         log("Dashboard scan returned empty", "ERROR")
     else:
         log(f"Dashboard scan complete — {len(data)} tickers")
-        buy_count = sum(1 for d in data.values() if d["label"] == "BUY")
+        buy_count = sum(1 for d in data.values() if str(d.get("label", "")).startswith("BUY"))
         watch_count = sum(1 for d in data.values() if d["label"] == "WATCH")
         avg_rsi = np.mean([d["rsi"] for d in data.values()])
         strongest = max(data.items(), key=lambda x: x[1]["confidence"])
@@ -407,6 +521,7 @@ with tab_dash:
         df_display.sort_values(["_sort", "Confidence"], ascending=[True, False], inplace=True)
         df_display.drop(columns=["_sort"], inplace=True)
         df_display.reset_index(drop=True, inplace=True)
+        st.session_state["snapshot_dash_df"] = df_display.copy()
 
         def _color_macd(val):
             try:
@@ -525,6 +640,8 @@ with tab_dash:
 with tab_squeeze:
     if not token:
         st.warning("⚠️ Connect your T-Bank API token to enable Squeeze detection.")
+    elif not sync_squeeze:
+        st.info("⏸️ Squeeze auto-scan sync is OFF for this tab.")
     elif not selected_tickers:
         st.warning("⚠️ Select at least one ticker.")
     else:
@@ -545,7 +662,14 @@ with tab_squeeze:
         if not sq_data:
             st.info("No squeeze data returned.")
         else:
-            sorted_sq = sorted(sq_data.items(), key=lambda x: x[1]["metrics"]["score"])
+            sorted_sq = sorted(
+                sq_data.items(),
+                key=lambda x: (
+                    0 if x[1]["metrics"]["is_breakout"] else 1,
+                    0 if x[1]["metrics"]["is_squeeze"] else 1,
+                    -x[1]["metrics"]["score"],
+                ),
+            )
             breakouts = [t for t, d in sorted_sq if d["metrics"]["is_breakout"]]
             if breakouts:
                 for b in breakouts:
@@ -573,6 +697,7 @@ with tab_squeeze:
                 })
 
             df_sq = pd.DataFrame(rows_sq)
+            st.session_state["snapshot_squeeze_df"] = df_sq.copy()
 
             styled_sq = (
                 df_sq.style
@@ -600,6 +725,8 @@ with tab_squeeze:
 with tab_port:
     if not token:
         st.warning("⚠️ Connect your T-Bank API token to view portfolio.")
+    elif not sync_portfolio:
+        st.info("⏸️ Portfolio auto-scan sync is OFF for this tab.")
     else:
         with st.spinner("📂 Loading portfolio…"):
             pf = fetch_portfolio(token)
@@ -618,6 +745,7 @@ with tab_port:
             if pf["positions"]:
                 df_pos = pd.DataFrame(pf["positions"])
                 df_pos.columns = ["Ticker", "Qty", "Avg Price", "Last Price", "Value", "P&L", "P&L %", "Day P&L", "Day P&L %"]
+                st.session_state["snapshot_positions_df"] = df_pos.copy()
 
                 def _style_pos(df):
                     styles = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -693,6 +821,8 @@ with tab_port:
 with tab_divs:
     if not token:
         st.warning("⚠️ Connect your T-Bank API token to view dividends.")
+    elif not sync_dividends:
+        st.info("⏸️ Dividends auto-scan sync is OFF for this tab.")
     else:
         pf_for_divs = fetch_portfolio(token)
         portfolio_map = {p["ticker"]: p for p in pf_for_divs.get("positions", [])}
@@ -723,6 +853,7 @@ with tab_divs:
                 })
 
             df_div = pd.DataFrame(rows_div)
+            st.session_state["snapshot_dividends_df"] = df_div.copy()
 
             def _style_divs(df):
                 styles = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -870,7 +1001,7 @@ with tab_sandbox:
         if not mkt_data:
             st.info("Run Dashboard scan first to see BUY signals here.")
         else:
-            buy_signals = {t: d for t, d in mkt_data.items() if d["label"] == "BUY"}
+            buy_signals = {t: d for t, d in mkt_data.items() if str(d.get("label", "")).startswith("BUY")}
             if not buy_signals:
                 st.info("No active BUY signals to paper-trade.")
             else:
@@ -1060,16 +1191,22 @@ with tab_logs:
     # Display log content
     st.code(log_text if log_text else "(no logs yet)", language="log")
 
+# Header one-click snapshot copy is rendered here so it sees latest table snapshots from this run.
+with snapshot_copy_slot:
+    st_copy_to_clipboard(
+        text=build_all_tables_snapshot_text(),
+        before_copy_label="📋 Copy 4 Tables Snapshot (UTC+3)",
+        after_copy_label="✅ Snapshot Copied",
+    )
 
 # ═════════════════════════════════════════════════════════════════════
 # AUTO-SCAN LOOP (Non-Blocking)
 # ═════════════════════════════════════════════════════════════════════
 if auto_scan and token and selected_tickers:
+    if st_autorefresh:
+        st_autorefresh(interval=int(scan_interval * 1000), key="vostok_auto_refresh")
+    else:
+        time.sleep(scan_interval)
+        st.rerun()
     placeholder = st.empty()
     placeholder.info(f"⚡ Auto-refresh active — next scan in {scan_interval}s")
-    
-    # Non-blocking browser reload (bypasses python GIL sleep locks)
-    st.components.v1.html(
-        f'<script>setTimeout(function(){{ window.parent.location.reload(); }}, {scan_interval * 1000});</script>',
-        height=0, width=0,
-    )
