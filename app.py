@@ -15,6 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from loguru import logger
+from streamlit_autorefresh import st_autorefresh
 from st_copy_to_clipboard import st_copy_to_clipboard
 
 # ── Page Config ──────────────────────────────────────────────────────
@@ -1065,11 +1066,5 @@ with tab_logs:
 # AUTO-SCAN LOOP (Non-Blocking)
 # ═════════════════════════════════════════════════════════════════════
 if auto_scan and token and selected_tickers:
-    placeholder = st.empty()
-    placeholder.info(f"⚡ Auto-refresh active — next scan in {scan_interval}s")
-    
-    # Non-blocking browser reload (bypasses python GIL sleep locks)
-    st.components.v1.html(
-        f'<script>setTimeout(function(){{ window.parent.location.reload(); }}, {scan_interval * 1000});</script>',
-        height=0, width=0,
-    )
+    st.sidebar.info(f"⚡ Auto-refresh active — every {scan_interval}s")
+    _refresh_count = st_autorefresh(interval=scan_interval * 1000, key="auto_refresh_counter")
